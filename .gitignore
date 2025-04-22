@@ -172,3 +172,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+training/
+runs/
+output_videos/
+input_videos/
+models/
+yolov8x.pt
