@@ -178,3 +178,4 @@ output_videos/
 input_videos/
 models/
 yolov8x.pt
+stubs/
