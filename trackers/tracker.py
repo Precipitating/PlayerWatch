@@ -8,7 +8,7 @@ import sys
 import pandas as pd
 import numpy as np
 sys.path.append('../')
-from utils import get_center_of_bbox, get_bbox_width
+from utils import get_center_of_bbox, get_bbox_width, get_foot_pos
 
 class Tracker:
     def __init__(self, model_path):
@@ -16,18 +16,33 @@ class Tracker:
         self.tracker = sv.ByteTrack()
 
 
+    def add_postiton_to_tracks(self, tracks):
+        for object, object_tracks in tracks.items():
+            for frame_num, track in enumerate(object_tracks):
+                for track_id, track_info in track.items():
+                    bbox = track_info['bbox']
+                    if object == 'ball':
+                        position = get_center_of_bbox(bbox)
+                    else:
+                        position = get_foot_pos(bbox)
+                    tracks[object][frame_num][track_id]['position'] = position
+
+
+
+
+
     def interpolate_ball_positions(self, ball_pos):
         # get ball's bounding box else return empty container
-        ball_pos = [x.get(1,{}).get('bbox',[] )for x in ball_pos]
-        df_ball_pos = pd.DataFrame(ball_pos, columns=['x1','y1', 'x2', 'y2'])
+        ball_positions = [x.get(1, {}).get('bbox', []) for x in ball_pos]
+        df_ball_positions = pd.DataFrame(ball_positions, columns=['x1', 'y1', 'x2', 'y2'])
 
-        # interpolate missing values
-        df_ball_pos = df_ball_pos.interpolate()
-        df_ball_pos = df_ball_pos.bfill()
+        # Interpolate missing values
+        df_ball_positions = df_ball_positions.interpolate()
+        df_ball_positions = df_ball_positions.bfill()
 
-        ball_pos = [{1: {"bbox":x}} for x in df_ball_pos.to_numpy().tolist()]
+        ball_positions = [{1: {"bbox": x}} for x in df_ball_positions.to_numpy().tolist()]
 
-        return ball_pos
+        return ball_positions
 
     def detect_frames(self, frames):
         batch_size = 20
