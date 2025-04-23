@@ -11,7 +11,7 @@ class TeamAssign:
         image_2d = image.reshape(-1, 3)
 
         # perform k means with 2 clusters
-        kmeans = KMeans(n_clusters=2, init="k-means++", n_init=1)
+        kmeans = KMeans(n_clusters=2, init="k-means++", n_init=10)
         kmeans.fit(image_2d)
 
         return kmeans
