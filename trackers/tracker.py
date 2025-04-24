@@ -7,13 +7,47 @@ import cv2
 import sys
 import pandas as pd
 import numpy as np
-sys.path.append('../')
+from tqdm import tqdm
 from utils import get_center_of_bbox, get_bbox_width, get_foot_pos
+
+sys.path.append('../')
+
+BALL_ID = 0
+GOALKEEPER_ID = 1
+PLAYER_ID = 2
+REFEREE_ID = 3
+
 
 class Tracker:
     def __init__(self, model_path):
         self.model = YOLO(model_path)
         self.tracker = sv.ByteTrack()
+        self.ellipse_annotator = sv.EllipseAnnotator(
+            color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
+            thickness=2
+        )
+        self.label_annotator = sv.LabelAnnotator(
+            color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
+            text_color=sv.Color.from_hex('#000000'),
+            text_position=sv.Position.BOTTOM_CENTER
+        )
+        self.triangle_annotator = sv.TriangleAnnotator(
+            color=sv.Color.from_hex('#FFD700'),
+            base=25,
+            height=21,
+            outline_thickness=1
+        )
+
+        self.vertex_annotator = sv.VertexAnnotator(
+            color=sv.Color.from_hex('#FF1493'),
+            radius=8)
+
+        self.vertex_annotator_2 = sv.VertexAnnotator(
+            color=sv.Color.from_hex('#00BFFF'),
+            radius=8)
+
+
+
 
 
     def add_postiton_to_tracks(self, tracks):
@@ -44,78 +78,166 @@ class Tracker:
 
         return ball_positions
 
-    def detect_frames(self, frames):
-        batch_size = 20
-        detections = []
+    def resolve_goalkeepers_team_id(self, players: sv.Detections, goalkeepers: sv.Detections) -> np.ndarray:
+        goalkeepers_xy = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+        players_xy = players.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+        team_0_centroid = players_xy[players.class_id == 0].mean(axis=0)
+        team_1_centroid = players_xy[players.class_id == 1].mean(axis=0)
+        goalkeepers_team_id = []
+        for goalkeeper_xy in goalkeepers_xy:
+            dist_0 = np.linalg.norm(goalkeeper_xy - team_0_centroid)
+            dist_1 = np.linalg.norm(goalkeeper_xy - team_1_centroid)
+            goalkeepers_team_id.append(0 if dist_0 < dist_1 else 1)
 
-        for i in range(0, len(frames), batch_size):
-            detections_batch = self.model.predict(frames[i:i+batch_size], conf=0.1)
-            detections += detections_batch
-        return detections
+        return np.array(goalkeepers_team_id)
 
 
-    def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
-        # load data if read_from_stub is true
+    def initialize_and_annotate(self, frame_gen, batch_size, team_classifier, read_from_stub=False, stub_path=None):
+
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
             with open(stub_path, 'rb') as f:
-                tracks = pickle.load(f)
+                processed_frames = pickle.load(f)
                 print("found stub")
-            return tracks
+                return processed_frames
+
+        frame_batch = []
+        annotated_result = []
 
 
-        detections = self.detect_frames(frames)
+        for frame in tqdm(frame_gen, desc="Processing Frames"):
+            frame_batch.append(frame)
 
-        tracks = {
-            "players":[], #
-            "referees":[],
-            "ball":[]
-        }
+            if len(frame_batch) >= batch_size:
+                # if batch size reached process it
+                detections_batch = self.model.predict(frame_batch, conf= 0.3)
 
-        for frame_num, detection in enumerate(detections):
-            cls_names = detection.names
-            # swap key/val around
-            cls_names_inv = {v:k for k,v in cls_names.items()}
+                # process each frame in batch
+                for frame_in_batch, detections in zip(frame_batch, detections_batch):
+                    detections = sv.Detections.from_ultralytics(detections)
 
-            # convert to supervision detection format
-            detection_supervision = sv.Detections.from_ultralytics(detection)
+                    ball_detections = detections[detections.class_id == BALL_ID]
+                    ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
 
-            # convert GK to player
-            for object_idx, class_id in enumerate(detection_supervision.class_id):
-                if cls_names[class_id] == "goalkeeper":
-                    detection_supervision.class_id[object_idx] = cls_names_inv["player"]
+                    all_detections = detections[detections.class_id != BALL_ID]
+                    all_detections = all_detections.with_nms(threshold=0.5, class_agnostic=True)
+                    all_detections = self.tracker.update_with_detections(all_detections)
 
+                    players_detections = all_detections[all_detections.class_id == PLAYER_ID]
+                    goalkeepers_detections = all_detections[all_detections.class_id == GOALKEEPER_ID]
+                    referees_detections = all_detections[all_detections.class_id == REFEREE_ID]
 
+                    players_crops = [sv.crop_image(frame_in_batch, xyxy) for xyxy in players_detections.xyxy]
+                    players_detections.class_id = team_classifier.predict(players_crops)
 
-            # track objects
-            detections_with_tracks = self.tracker.update_with_detections(detection_supervision)
-            tracks["players"].append({})
-            tracks["referees"].append({})
-            tracks["ball"].append({})
+                    goalkeepers_detections.class_id = self.resolve_goalkeepers_team_id(players_detections, goalkeepers_detections)
 
-            for frame_detection in detections_with_tracks:
-                bbox = frame_detection[0].tolist()
-                cls_id = frame_detection[3]
-                track_id = frame_detection[4]
+                    referees_detections.class_id -= 1
 
-                if cls_id == cls_names_inv['player']:
-                    tracks["players"][frame_num][track_id] = {"bbox":bbox}
-
-                if cls_id == cls_names_inv['referee']:
-                    tracks["referees"][frame_num][track_id] = {"bbox":bbox}
+                    all_detections = sv.Detections.merge([players_detections, goalkeepers_detections, referees_detections])
 
 
-            for frame_detection in detection_supervision:
-                bbox = frame_detection[0].tolist()
-                cls_id = frame_detection[3]
 
-                if cls_id == cls_names_inv['ball']:
-                    tracks["ball"][frame_num][1] = {"bbox": bbox}
+                    labels = [
+                        f"#{tracker_id}"
+                        for tracker_id
+                        in all_detections.tracker_id
+                    ]
+                    all_detections.class_id = all_detections.class_id.astype(int)
+
+                    annotated_frame = frame_in_batch.copy()  # Copy the frame to not modify the original one
+                    annotated_frame = self.ellipse_annotator.annotate(annotated_frame, all_detections)
+                    annotated_frame = self.label_annotator.annotate(annotated_frame, all_detections,labels)
+                    annotated_frame = self.triangle_annotator.annotate(annotated_frame, ball_detections)
+
+
+                    # Append annotated frame to results
+                    annotated_result.append(annotated_frame)
+
+                # Reset the batch
+                frame_batch = []
+
+
+
+
+
 
         if stub_path is not None:
             with open(stub_path, 'wb') as f:
-                pickle.dump(tracks,f)
+                pickle.dump(annotated_result, f)
 
-        return tracks
+        return annotated_result
+
+
+
+
+
+
+
+
+
+
+    # def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
+    #     # load data if read_from_stub is true
+    #     if read_from_stub and stub_path is not None and os.path.exists(stub_path):
+    #         with open(stub_path, 'rb') as f:
+    #             tracks = pickle.load(f)
+    #             print("found stub")
+    #         return tracks
+    #
+    #
+    #     detections = self.detect_frames(frames)
+    #
+    #     tracks = {
+    #         "players":[], #
+    #         "referees":[],
+    #         "ball":[]
+    #     }
+    #
+    #     for frame_num, detection in enumerate(detections):
+    #         cls_names = detection.names
+    #         # swap key/val around
+    #         cls_names_inv = {v:k for k,v in cls_names.items()}
+    #
+    #         # convert to supervision detection format
+    #         detection_supervision = sv.Detections.from_ultralytics(detection)
+    #
+    #         # convert GK to player
+    #         for object_idx, class_id in enumerate(detection_supervision.class_id):
+    #             if cls_names[class_id] == "goalkeeper":
+    #                 detection_supervision.class_id[object_idx] = cls_names_inv["player"]
+    #
+    #
+    #
+    #         # track objects
+    #         detections_with_tracks = self.tracker.update_with_detections(detection_supervision)
+    #         tracks["players"].append({})
+    #         tracks["referees"].append({})
+    #         tracks["ball"].append({})
+    #
+    #         for frame_detection in detections_with_tracks:
+    #             bbox = frame_detection[0].tolist()
+    #             cls_id = frame_detection[3]
+    #             track_id = frame_detection[4]
+    #
+    #             if cls_id == cls_names_inv['player']:
+    #                 tracks["players"][frame_num][track_id] = {"bbox":bbox}
+    #
+    #             if cls_id == cls_names_inv['referee']:
+    #                 tracks["referees"][frame_num][track_id] = {"bbox":bbox}
+    #
+    #
+    #         for frame_detection in detection_supervision:
+    #             bbox = frame_detection[0].tolist()
+    #             cls_id = frame_detection[3]
+    #
+    #             if cls_id == cls_names_inv['ball']:
+    #                 tracks["ball"][frame_num][1] = {"bbox": bbox}
+    #
+    #     if stub_path is not None:
+    #         with open(stub_path, 'wb') as f:
+    #             pickle.dump(tracks,f)
+    #
+    #     return tracks
 
 
     def draw_ellipse(self, frame, bbox, color, track_id=None):

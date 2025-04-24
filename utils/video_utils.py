@@ -1,23 +1,31 @@
 import cv2
+import supervision as sv
+from tqdm import tqdm
 
-## append list of frames to a container
-def read_video(path):
-    cap = cv2.VideoCapture(path)
-    frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
-    return frames
+def read_video(path, stride = 1):
+
+    frame_gen = sv.get_video_frames_generator(path, stride)
+    return frame_gen
 
 
-def save_video(output_frames, output_path):
+
+
+def save_video(source_path, target_path, frames):
+    video_info = sv.VideoInfo.from_video_path(source_path)
+    fps = video_info.fps
+    width, height = video_info.resolution_wh
+
+    # Define the video writer
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(output_path, fourcc, 24, (output_frames[0].shape[1], output_frames[0].shape[0]))
-    for frame in output_frames:
+    out = cv2.VideoWriter(target_path, fourcc, fps, (width, height))
+
+    for frame in frames:
         out.write(frame)
+
     out.release()
+
+
+
 
 
 

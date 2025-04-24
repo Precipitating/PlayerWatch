@@ -1,10 +1,17 @@
-from babel.messages.plurals import get_plural
 from sklearn.cluster import KMeans
+from tqdm import tqdm
+import supervision as sv
+import os
+import pickle
+
+PLAYER_ID = 2
 
 class TeamAssign:
-    def __init__(self):
-        self.team_colors = {}
-        self.player_team_dict = {}
+    def __init__(self, input_frame_gen, input_model):
+        self.frame_gen = input_frame_gen
+        self.model = input_model
+
+
 
     def get_clustering_model(self, image):
         # reshape to 2D array
@@ -39,9 +46,6 @@ class TeamAssign:
 
         return player_color
 
-
-
-
     def assign_team_color(self, frame, player_detections):
         player_colors = []
         for _, player_detection in player_detections.items():
@@ -70,3 +74,51 @@ class TeamAssign:
         self.player_team_dict[player_id] = team_id
 
         return team_id
+
+
+
+    def extract_crops(self, batch_size, read_from_stub=False, stub_path=None):
+
+        if read_from_stub and stub_path is not None and os.path.exists(stub_path):
+            with open(stub_path, 'rb') as f:
+                extracted_crop = pickle.load(f)
+                print("found crop stub")
+                return extracted_crop
+
+        frame_batch = []
+
+        crops = []
+        for frame in tqdm(self.frame_gen, desc="Collecting Crops"):
+            frame_batch.append(frame)
+
+            if len(frame_batch) >= batch_size:
+                # if batch size reached process it
+                detections_batch = self.model.predict(frame_batch, conf=0.3)
+
+                # process each frame in batch
+                for frame_in_batch, detections in zip(frame_batch, detections_batch):
+                    detections = sv.Detections.from_ultralytics(detections)
+                    detections = detections.with_nms(threshold=0.5, class_agnostic=True)
+                    detections = detections[detections.class_id == PLAYER_ID]
+                    players_crops = [sv.crop_image(frame, xyxy) for xyxy in detections.xyxy]
+                    crops += players_crops
+
+                # Reset the batch
+                frame_batch = []
+
+
+
+
+
+
+
+        if stub_path is not None:
+            with open(stub_path, 'wb') as f:
+                pickle.dump(crops, f)
+
+
+        return crops
+
+
+
+
