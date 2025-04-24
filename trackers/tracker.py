@@ -8,6 +8,8 @@ import sys
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+
+import player_ball_assign
 from utils import get_center_of_bbox, get_bbox_width, get_foot_pos
 
 sys.path.append('../')
@@ -22,6 +24,7 @@ class Tracker:
     def __init__(self, model_path):
         self.model = YOLO(model_path)
         self.tracker = sv.ByteTrack()
+
         self.ellipse_annotator = sv.EllipseAnnotator(
             color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
             thickness=2
@@ -33,6 +36,12 @@ class Tracker:
         )
         self.triangle_annotator = sv.TriangleAnnotator(
             color=sv.Color.from_hex('#FFD700'),
+            base=25,
+            height=21,
+            outline_thickness=1
+        )
+        self.triangle_ball_possessor_annotator = sv.TriangleAnnotator(
+            color=sv.Color.from_hex('#880808'),
             base=25,
             height=21,
             outline_thickness=1
@@ -92,6 +101,17 @@ class Tracker:
         return np.array(goalkeepers_team_id)
 
 
+    def get_player_in_possession(self, ball_bbox, players, assigner):
+
+        assigned_player = assigner.assign_ball_to_player(players=players, ball_bbox= ball_bbox)
+        if assigned_player != -1:
+            return assigned_player
+        else:
+            return -1
+
+
+
+
     def initialize_and_annotate(self, frame_gen, batch_size, team_classifier, read_from_stub=False, stub_path=None):
 
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
@@ -102,19 +122,20 @@ class Tracker:
 
         frame_batch = []
         annotated_result = []
-
+        player_assigner = player_ball_assign.PlayerBallAssign()
 
         for frame in tqdm(frame_gen, desc="Processing Frames"):
             frame_batch.append(frame)
 
             if len(frame_batch) >= batch_size:
                 # if batch size reached process it
-                detections_batch = self.model.predict(frame_batch, conf= 0.3)
+                detections_batch = self.model.predict(frame_batch, conf= 0.1)
 
                 # process each frame in batch
                 for frame_in_batch, detections in zip(frame_batch, detections_batch):
                     detections = sv.Detections.from_ultralytics(detections)
 
+                    # ball
                     ball_detections = detections[detections.class_id == BALL_ID]
                     ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
 
@@ -125,6 +146,18 @@ class Tracker:
                     players_detections = all_detections[all_detections.class_id == PLAYER_ID]
                     goalkeepers_detections = all_detections[all_detections.class_id == GOALKEEPER_ID]
                     referees_detections = all_detections[all_detections.class_id == REFEREE_ID]
+
+                    # get player in possession of ball
+                    player_in_possession = None
+                    if len(ball_detections) != 0:
+                        player_in_possession = self.get_player_in_possession(ball_bbox= ball_detections.xyxy[0], players= players_detections, assigner= player_assigner)
+
+                        if player_in_possession != -1:
+                            player_in_possession = players_detections[players_detections.tracker_id == player_in_possession]
+                            player_in_possession.xyxy = sv.pad_boxes(xyxy=player_in_possession.xyxy, px=10)
+
+
+
 
                     players_crops = [sv.crop_image(frame_in_batch, xyxy) for xyxy in players_detections.xyxy]
                     players_detections.class_id = team_classifier.predict(players_crops)
@@ -144,10 +177,14 @@ class Tracker:
                     ]
                     all_detections.class_id = all_detections.class_id.astype(int)
 
-                    annotated_frame = frame_in_batch.copy()  # Copy the frame to not modify the original one
+                    # draw annotations
+                    annotated_frame = frame_in_batch.copy()  # copy the frame to not modify the original one
                     annotated_frame = self.ellipse_annotator.annotate(annotated_frame, all_detections)
                     annotated_frame = self.label_annotator.annotate(annotated_frame, all_detections,labels)
                     annotated_frame = self.triangle_annotator.annotate(annotated_frame, ball_detections)
+
+                    if isinstance(player_in_possession, sv.Detections):
+                        annotated_frame = self.triangle_ball_possessor_annotator.annotate(annotated_frame, player_in_possession)
 
 
                     # Append annotated frame to results

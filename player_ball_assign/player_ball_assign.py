@@ -13,8 +13,8 @@ class PlayerBallAssign():
         min_dist= 99999
         assigned_player= -1
 
-        for player_id, player in players.items():
-            player_bbox = player['bbox']
+        for i in range(len(players)):
+            player_bbox = players.xyxy[i]
 
             dist_left = measure_dist((player_bbox[0], player_bbox[-1]),ball_pos)
             dist_right = measure_dist((player_bbox[2], player_bbox[-1]),ball_pos)
@@ -24,7 +24,7 @@ class PlayerBallAssign():
             if dist < self.max_player_ball_dist:
                 if dist < min_dist:
                     min_dist = dist
-                    assigned_player = player_id
+                    assigned_player = players.tracker_id[i]
 
 
         return assigned_player

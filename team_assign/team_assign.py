@@ -90,21 +90,13 @@ class TeamAssign:
         crops = []
         for frame in tqdm(self.frame_gen, desc="Collecting Crops"):
             frame_batch.append(frame)
+            analyzed_frame = self.model.predict(frame, conf=0.3)[0]
 
-            if len(frame_batch) >= batch_size:
-                # if batch size reached process it
-                detections_batch = self.model.predict(frame_batch, conf=0.3)
-
-                # process each frame in batch
-                for frame_in_batch, detections in zip(frame_batch, detections_batch):
-                    detections = sv.Detections.from_ultralytics(detections)
-                    detections = detections.with_nms(threshold=0.5, class_agnostic=True)
-                    detections = detections[detections.class_id == PLAYER_ID]
-                    players_crops = [sv.crop_image(frame, xyxy) for xyxy in detections.xyxy]
-                    crops += players_crops
-
-                # Reset the batch
-                frame_batch = []
+            detections = sv.Detections.from_ultralytics(analyzed_frame)
+            detections = detections.with_nms(threshold=0.5, class_agnostic=True)
+            detections = detections[detections.class_id == PLAYER_ID]
+            players_crops = [sv.crop_image(frame, xyxy) for xyxy in detections.xyxy]
+            crops += players_crops
 
 
 
