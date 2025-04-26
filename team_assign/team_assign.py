@@ -77,7 +77,7 @@ class TeamAssign:
 
 
 
-    def extract_crops(self, batch_size, read_from_stub=False, stub_path=None):
+    def extract_crops(self, read_from_stub=False, stub_path=None):
 
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
             with open(stub_path, 'rb') as f:
@@ -89,19 +89,14 @@ class TeamAssign:
 
         crops = []
         for frame in tqdm(self.frame_gen, desc="Collecting Crops"):
-            frame_batch.append(frame)
+            #frame_batch.append(frame)
             analyzed_frame = self.model.predict(frame, conf=0.3)[0]
 
             detections = sv.Detections.from_ultralytics(analyzed_frame)
             detections = detections.with_nms(threshold=0.5, class_agnostic=True)
-            detections = detections[detections.class_id == PLAYER_ID]
+            player_detections = detections[detections.class_id == PLAYER_ID]
             players_crops = [sv.crop_image(frame, xyxy) for xyxy in detections.xyxy]
             crops += players_crops
-
-
-
-
-
 
 
         if stub_path is not None:

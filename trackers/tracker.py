@@ -1,3 +1,5 @@
+import copy
+
 import cv2
 from ultralytics import YOLO
 import supervision as sv
@@ -8,6 +10,8 @@ import sys
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+from filterpy.kalman import KalmanFilter
+from ultralytics.models.sam.amg import build_all_layer_point_grids
 
 import player_ball_assign
 from utils import get_center_of_bbox, get_bbox_width, get_foot_pos
@@ -19,15 +23,101 @@ GOALKEEPER_ID = 1
 PLAYER_ID = 2
 REFEREE_ID = 3
 
+class BallTracker:
+    def __init__(self, incomplete_ball_positions, annotated_frames, player_positions):
+        self.incomplete_ball_positions = incomplete_ball_positions
+        self.complete_ball_positions = []
+        self.annotated_frames = annotated_frames
+        self.player_assigner = player_ball_assign.PlayerBallAssign()
+        self.player_positions = player_positions
+
+        self.triangle_annotator = sv.TriangleAnnotator(
+            color=sv.Color.from_hex('#FFD700'),
+            base=25,
+            height=21,
+            outline_thickness=1
+        )
+
+        self.triangle_ball_possessor_annotator = sv.TriangleAnnotator(
+            color=sv.Color.from_hex('#880808'),
+            base=25,
+            height=21,
+            outline_thickness=1
+        )
+
+
+
+
+    # interpolate and fill missing positions
+    def fill_missing_positions(self):
+        converted_positions = [x.xyxy[0] for x in self.incomplete_ball_positions]
+        df_ball_positions = pd.DataFrame(converted_positions, columns=['x1', 'y1', 'x2', 'y2'])
+        df_ball_positions = df_ball_positions.interpolate()
+        df_ball_positions = df_ball_positions.bfill()
+        df_ball_positions = df_ball_positions.to_numpy()
+
+
+        for i in range(len(self.incomplete_ball_positions)):
+            if np.isnan(self.incomplete_ball_positions[i].xyxy[0]).any():
+                prev_det = self.incomplete_ball_positions[i - 1]
+                new_det = sv.Detections(xyxy=np.array([df_ball_positions[i]]),
+                                        confidence= prev_det.confidence[:1],
+                                        class_id=prev_det.class_id[:1],
+                                        tracker_id=prev_det.tracker_id[:1] if prev_det.tracker_id is not None else None,
+                                        data={k: v[:1] for k, v in prev_det.data.items()}
+                                        )
+                self.incomplete_ball_positions[i] = new_det
+
+
+
+
+
+
+    def handle_ball_tracking(self):
+        self.fill_missing_positions()
+
+        final_frame_result = []
+        for frame_num, frame in enumerate(tqdm(self.annotated_frames, desc="Processing Ball Tracking Frames")):
+            # track player in possession of ball if within distance
+            player_in_possession = None
+
+            player_in_possession = self.player_assigner.assign_ball_to_player(ball_bbox=self.incomplete_ball_positions[frame_num].xyxy[0],
+                                                                              players=self.player_positions[frame_num])
+            if player_in_possession != -1:
+                player_in_possession = self.player_positions[frame_num][self.player_positions[frame_num].tracker_id == player_in_possession]
+                player_in_possession.xyxy = sv.pad_boxes(xyxy=player_in_possession.xyxy, px=10)
+
+            # go thru annotated frames and annotate the ball
+            frame = self.triangle_annotator.annotate(frame, self.incomplete_ball_positions[frame_num])
+
+            # go thru annotated frames and annotate the player in possession of ball
+            if isinstance(player_in_possession, sv.Detections):
+                frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
+
+
+            final_frame_result.append(frame)
+
+
+        return final_frame_result
+
+
+
+
+
+
 
 class Tracker:
     def __init__(self, model_path):
         self.model = YOLO(model_path)
+        print(self.model.names)
         self.tracker = sv.ByteTrack()
 
+
+        # initialize labels
         self.ellipse_annotator = sv.EllipseAnnotator(
             color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
             thickness=2
+
         )
         self.label_annotator = sv.LabelAnnotator(
             color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
@@ -59,6 +149,9 @@ class Tracker:
 
 
 
+
+
+
     def add_postiton_to_tracks(self, tracks):
         for object, object_tracks in tracks.items():
             for frame_num, track in enumerate(object_tracks):
@@ -71,21 +164,6 @@ class Tracker:
                     tracks[object][frame_num][track_id]['position'] = position
 
 
-
-
-
-    def interpolate_ball_positions(self, ball_pos):
-        # get ball's bounding box else return empty container
-        ball_positions = [x.get(1, {}).get('bbox', []) for x in ball_pos]
-        df_ball_positions = pd.DataFrame(ball_positions, columns=['x1', 'y1', 'x2', 'y2'])
-
-        # Interpolate missing values
-        df_ball_positions = df_ball_positions.interpolate()
-        df_ball_positions = df_ball_positions.bfill()
-
-        ball_positions = [{1: {"bbox": x}} for x in df_ball_positions.to_numpy().tolist()]
-
-        return ball_positions
 
     def resolve_goalkeepers_team_id(self, players: sv.Detections, goalkeepers: sv.Detections) -> np.ndarray:
         goalkeepers_xy = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
@@ -122,6 +200,9 @@ class Tracker:
 
         frame_batch = []
         annotated_result = []
+        ball_positions = []
+        player_positions = []
+
         player_assigner = player_ball_assign.PlayerBallAssign()
 
         for frame in tqdm(frame_gen, desc="Processing Frames"):
@@ -129,7 +210,7 @@ class Tracker:
 
             if len(frame_batch) >= batch_size:
                 # if batch size reached process it
-                detections_batch = self.model.predict(frame_batch, conf= 0.1)
+                detections_batch = self.model.predict(frame_batch, conf= 0.3)
 
                 # process each frame in batch
                 for frame_in_batch, detections in zip(frame_batch, detections_batch):
@@ -139,24 +220,25 @@ class Tracker:
                     ball_detections = detections[detections.class_id == BALL_ID]
                     ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
 
+                    if len(ball_detections) == 0:
+                        ball_positions.append(ball_positions[-1])
+                        ball_positions[-1].xyxy[0] = np.nan
+                    else:
+                        ball_positions.append(ball_detections[0])
+
+
+
                     all_detections = detections[detections.class_id != BALL_ID]
                     all_detections = all_detections.with_nms(threshold=0.5, class_agnostic=True)
                     all_detections = self.tracker.update_with_detections(all_detections)
 
                     players_detections = all_detections[all_detections.class_id == PLAYER_ID]
+                    player_positions.append(copy.deepcopy(players_detections))
+
+
+
                     goalkeepers_detections = all_detections[all_detections.class_id == GOALKEEPER_ID]
                     referees_detections = all_detections[all_detections.class_id == REFEREE_ID]
-
-                    # get player in possession of ball
-                    player_in_possession = None
-                    if len(ball_detections) != 0:
-                        player_in_possession = self.get_player_in_possession(ball_bbox= ball_detections.xyxy[0], players= players_detections, assigner= player_assigner)
-
-                        if player_in_possession != -1:
-                            player_in_possession = players_detections[players_detections.tracker_id == player_in_possession]
-                            player_in_possession.xyxy = sv.pad_boxes(xyxy=player_in_possession.xyxy, px=10)
-
-
 
 
                     players_crops = [sv.crop_image(frame_in_batch, xyxy) for xyxy in players_detections.xyxy]
@@ -181,10 +263,7 @@ class Tracker:
                     annotated_frame = frame_in_batch.copy()  # copy the frame to not modify the original one
                     annotated_frame = self.ellipse_annotator.annotate(annotated_frame, all_detections)
                     annotated_frame = self.label_annotator.annotate(annotated_frame, all_detections,labels)
-                    annotated_frame = self.triangle_annotator.annotate(annotated_frame, ball_detections)
-
-                    if isinstance(player_in_possession, sv.Detections):
-                        annotated_frame = self.triangle_ball_possessor_annotator.annotate(annotated_frame, player_in_possession)
+                   # annotated_frame = self.triangle_annotator.annotate(annotated_frame, ball_detections)
 
 
                     # Append annotated frame to results
@@ -200,177 +279,14 @@ class Tracker:
 
         if stub_path is not None:
             with open(stub_path, 'wb') as f:
-                pickle.dump(annotated_result, f)
-
-        return annotated_result
+                pickle.dump((annotated_result, ball_positions, player_positions), f)
 
 
-
+        return annotated_result, ball_positions, player_positions
 
 
 
 
-
-
-
-    # def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
-    #     # load data if read_from_stub is true
-    #     if read_from_stub and stub_path is not None and os.path.exists(stub_path):
-    #         with open(stub_path, 'rb') as f:
-    #             tracks = pickle.load(f)
-    #             print("found stub")
-    #         return tracks
-    #
-    #
-    #     detections = self.detect_frames(frames)
-    #
-    #     tracks = {
-    #         "players":[], #
-    #         "referees":[],
-    #         "ball":[]
-    #     }
-    #
-    #     for frame_num, detection in enumerate(detections):
-    #         cls_names = detection.names
-    #         # swap key/val around
-    #         cls_names_inv = {v:k for k,v in cls_names.items()}
-    #
-    #         # convert to supervision detection format
-    #         detection_supervision = sv.Detections.from_ultralytics(detection)
-    #
-    #         # convert GK to player
-    #         for object_idx, class_id in enumerate(detection_supervision.class_id):
-    #             if cls_names[class_id] == "goalkeeper":
-    #                 detection_supervision.class_id[object_idx] = cls_names_inv["player"]
-    #
-    #
-    #
-    #         # track objects
-    #         detections_with_tracks = self.tracker.update_with_detections(detection_supervision)
-    #         tracks["players"].append({})
-    #         tracks["referees"].append({})
-    #         tracks["ball"].append({})
-    #
-    #         for frame_detection in detections_with_tracks:
-    #             bbox = frame_detection[0].tolist()
-    #             cls_id = frame_detection[3]
-    #             track_id = frame_detection[4]
-    #
-    #             if cls_id == cls_names_inv['player']:
-    #                 tracks["players"][frame_num][track_id] = {"bbox":bbox}
-    #
-    #             if cls_id == cls_names_inv['referee']:
-    #                 tracks["referees"][frame_num][track_id] = {"bbox":bbox}
-    #
-    #
-    #         for frame_detection in detection_supervision:
-    #             bbox = frame_detection[0].tolist()
-    #             cls_id = frame_detection[3]
-    #
-    #             if cls_id == cls_names_inv['ball']:
-    #                 tracks["ball"][frame_num][1] = {"bbox": bbox}
-    #
-    #     if stub_path is not None:
-    #         with open(stub_path, 'wb') as f:
-    #             pickle.dump(tracks,f)
-    #
-    #     return tracks
-
-
-    def draw_ellipse(self, frame, bbox, color, track_id=None):
-        y2 = int(bbox[3])
-
-        x_center, _ = get_center_of_bbox(bbox)
-        width = get_bbox_width(bbox)
-        cv2.ellipse(
-            frame,
-            center=(x_center, y2),
-            axes=(int(width), int(0.35*width)),
-            angle = 0.0,
-            startAngle=-45,
-            endAngle=235,
-            color = color,
-            thickness=2,
-            lineType=cv2.LINE_4
-        )
-
-
-        # draw player ids
-        rectangle_width = 40
-        rectangle_height = 20
-
-        x1_rect = x_center - rectangle_width // 2
-        x2_rect = x_center + rectangle_width // 2
-        y1_rect = (y2-rectangle_height//2) + 15
-        y2_rect = (y2+rectangle_height//2) + 15
-
-
-        if track_id is not None:
-            cv2.rectangle(
-                frame,
-                (int(x1_rect), int(y1_rect)),
-                (int(x2_rect), int(y2_rect)),
-                color,
-                cv2.FILLED)
-
-            x1_text = x1_rect + 12
-            if track_id > 99:
-                x1_text -= 10
-
-
-            cv2.putText(
-                frame,
-                f"{track_id}",
-                (int(x1_text), int(y1_rect+15)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0,0,0),
-                2
-
-            )
-        return frame
-
-
-    def draw_triangle(self, frame, bbox, color):
-        y = int(bbox[1])
-        x, _ = get_center_of_bbox(bbox)
-        triangle_points = np.array([
-            [x,y],
-            [x-10, y-20],
-            [x+10, y-20]
-        ])
-        cv2.drawContours(frame, [triangle_points],0, color, cv2.FILLED)
-        cv2.drawContours(frame, [triangle_points],0, (0,0,0), 2)
-        return frame
-
-    def draw_annotations(self, video_frames, tracks):
-        output_video_frames = []
-
-        for frame_num, frame in enumerate(video_frames):
-            frame = frame.copy()
-
-            player_dict = tracks["players"][frame_num]
-            ref_dict = tracks["referees"][frame_num]
-            ball_dict = tracks["ball"][frame_num]
-
-            # draw players
-            for track_id, player in player_dict.items():
-                color = player.get("team_color",(0,0,255))
-                frame = self.draw_ellipse(frame, player["bbox"],color, track_id)
-
-                if player.get('has_ball', False):
-                    frame = self.draw_triangle(frame, player["bbox"], (0,0,255))
-
-            # draw ball
-
-            for track_id, ball in ball_dict.items():
-                frame = self.draw_triangle(frame, ball["bbox"], (0,255,0))
-
-
-
-            output_video_frames.append(frame)
-
-        return output_video_frames
 
 
 

@@ -1,4 +1,6 @@
 import cv2
+
+from trackers.tracker import BallTracker
 from utils import read_video, save_video
 from trackers import Tracker
 from team_assign import TeamAssign
@@ -11,15 +13,15 @@ import torch
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def main():
-    input_video_path = 'input_videos/sampletrim.mp4'
+    input_video_path = 'input_videos/sample.mp4'
     output_video_path = 'output_videos/output.avi'
-    tracker = Tracker('models/best.pt')
+    tracker = Tracker('models/main/best.pt')
 
     # assign team colors
     frame_gen= read_video(input_video_path, stride= 30)
 
     team_assigner = TeamAssign(frame_gen, tracker.model)
-    crops = team_assigner.extract_crops(1, read_from_stub= True, stub_path='stubs/crop_stub.pk1')
+    crops = team_assigner.extract_crops(read_from_stub= True, stub_path='stubs/crop_stub.pk1')
     team_classifier = TeamClassifier(device=DEVICE)
     team_classifier.fit(crops)
 
@@ -27,17 +29,24 @@ def main():
     frame_gen = read_video(input_video_path)
 
     # initialize model and annotate ball and player
-    annotated_frames = tracker.initialize_and_annotate(frame_gen= frame_gen,
-                                                       team_classifier= team_classifier,
-                                                       batch_size= 20,
-                                                       read_from_stub= True,
-                                                       stub_path= 'stubs/annotation_stub.pk1')
+    annotated_frames, ball_positions, player_positions = tracker.initialize_and_annotate(frame_gen= frame_gen,
+                                                                                         team_classifier= team_classifier,
+                                                                                         batch_size= 20,
+                                                                                         read_from_stub= True,
+                                                                                         stub_path= 'stubs/annotation_stub.pk1')
+
+
+    ball_tracker = BallTracker(incomplete_ball_positions= ball_positions,
+                               annotated_frames= annotated_frames,
+                               player_positions= player_positions)
+
+    ball_annotated_frames = ball_tracker.handle_ball_tracking()
 
 
 
 
 
-    save_video(input_video_path, output_video_path, annotated_frames)
+    save_video(input_video_path, output_video_path, ball_annotated_frames)
 
     # tracks = tracker.get_object_tracks(video_frames, read_from_stub=True, stub_path='stubs/track_stubs.pk1')
 
