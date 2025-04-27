@@ -10,11 +10,10 @@ import sys
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-from filterpy.kalman import KalmanFilter
-from ultralytics.models.sam.amg import build_all_layer_point_grids
 
 import player_ball_assign
 from utils import get_center_of_bbox, get_bbox_width, get_foot_pos
+from sports.common.ball import BallTracker, BallAnnotator
 
 sys.path.append('../')
 
@@ -23,13 +22,14 @@ GOALKEEPER_ID = 1
 PLAYER_ID = 2
 REFEREE_ID = 3
 
-class BallTracker:
+class BallHandler:
     def __init__(self, incomplete_ball_positions, annotated_frames, player_positions):
         self.incomplete_ball_positions = incomplete_ball_positions
         self.complete_ball_positions = []
         self.annotated_frames = annotated_frames
         self.player_assigner = player_ball_assign.PlayerBallAssign()
         self.player_positions = player_positions
+        self.ball_annotator = BallAnnotator(radius=7, buffer_size=10)
 
         self.triangle_annotator = sv.TriangleAnnotator(
             color=sv.Color.from_hex('#FFD700'),
@@ -59,18 +59,14 @@ class BallTracker:
 
         for i in range(len(self.incomplete_ball_positions)):
             if np.isnan(self.incomplete_ball_positions[i].xyxy[0]).any():
-                prev_det = self.incomplete_ball_positions[i - 1]
+                det = self.incomplete_ball_positions[i]
                 new_det = sv.Detections(xyxy=np.array([df_ball_positions[i]]),
-                                        confidence= prev_det.confidence[:1],
-                                        class_id=prev_det.class_id[:1],
-                                        tracker_id=prev_det.tracker_id[:1] if prev_det.tracker_id is not None else None,
-                                        data={k: v[:1] for k, v in prev_det.data.items()}
+                                        confidence= det.confidence[:1],
+                                        class_id=det.class_id[:1],
+                                        tracker_id=det.tracker_id[:1] if det.tracker_id is not None else None,
+                                        data={k: v[:1] for k, v in det.data.items()}
                                         )
                 self.incomplete_ball_positions[i] = new_det
-
-
-
-
 
 
     def handle_ball_tracking(self):
@@ -88,7 +84,8 @@ class BallTracker:
                 player_in_possession.xyxy = sv.pad_boxes(xyxy=player_in_possession.xyxy, px=10)
 
             # go thru annotated frames and annotate the ball
-            frame = self.triangle_annotator.annotate(frame, self.incomplete_ball_positions[frame_num])
+            frame = self.ball_annotator.annotate(frame, self.incomplete_ball_positions[frame_num])
+            #frame = self.triangle_annotator.annotate(frame, self.incomplete_ball_positions[frame_num])
 
             # go thru annotated frames and annotate the player in possession of ball
             if isinstance(player_in_possession, sv.Detections):
@@ -107,10 +104,13 @@ class BallTracker:
 
 
 class Tracker:
-    def __init__(self, model_path):
+    def __init__(self, model_path, ball_model_path, w,h):
         self.model = YOLO(model_path)
-        print(self.model.names)
+        self.ball_model = YOLO(ball_model_path)
+        print(self.ball_model.names)
         self.tracker = sv.ByteTrack()
+        self.ball_tracker = BallTracker(buffer_size=20)
+        self.w, self.h = w,h
 
 
         # initialize labels
@@ -188,6 +188,39 @@ class Tracker:
             return -1
 
 
+    def get_ball_detections(self, frame, ball_positions):
+        # ball
+        slicer = sv.InferenceSlicer(
+            callback=self.callback,
+            overlap_filter=sv.OverlapFilter.NON_MAX_SUPPRESSION,
+            slice_wh=(self.w // 2 + 100, self.h // 2 + 100),
+            overlap_ratio_wh=None,
+            overlap_wh=(100, 100),
+            iou_threshold=0.1
+        )
+        ball_detections = slicer(frame)
+
+        if len(ball_detections) == 0:
+            new_row = np.full((1, 4), np.nan)
+
+            filler_detection = sv.Detections.empty()
+            filler_detection.xyxy = np.vstack([filler_detection.xyxy, new_row])
+
+            filler_detection.class_id = np.append(filler_detection.class_id, 0)
+            filler_detection.confidence = np.append(filler_detection.confidence, 50.0)# filler value, doesn't matter as its getting predicted
+
+            ball_positions.append(filler_detection)
+        else:
+            ball_detections = self.ball_tracker.update(ball_detections)
+            ball_positions.append(ball_detections[0])
+
+
+
+    def callback(self, patch: np.ndarray) -> sv.Detections:
+        result = self.ball_model.predict(patch, conf=0.3)[0]
+        return sv.Detections.from_ultralytics(result)
+
+
 
 
     def initialize_and_annotate(self, frame_gen, batch_size, team_classifier, read_from_stub=False, stub_path=None):
@@ -203,28 +236,25 @@ class Tracker:
         ball_positions = []
         player_positions = []
 
-        player_assigner = player_ball_assign.PlayerBallAssign()
-
         for frame in tqdm(frame_gen, desc="Processing Frames"):
             frame_batch.append(frame)
+
+            # since slicing can only handle one frame at a time, we'll do ball detection per frame
+            self.get_ball_detections(frame, ball_positions)
 
             if len(frame_batch) >= batch_size:
                 # if batch size reached process it
                 detections_batch = self.model.predict(frame_batch, conf= 0.3)
+                #ball_detections_batch = self.ball_model.predict(frame_batch, conf= 0.3)
 
                 # process each frame in batch
                 for frame_in_batch, detections in zip(frame_batch, detections_batch):
+
                     detections = sv.Detections.from_ultralytics(detections)
 
-                    # ball
-                    ball_detections = detections[detections.class_id == BALL_ID]
-                    ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
+                    #ball_detections = detections[detections.class_id == BALL_ID]
+                   # ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
 
-                    if len(ball_detections) == 0:
-                        ball_positions.append(ball_positions[-1])
-                        ball_positions[-1].xyxy[0] = np.nan
-                    else:
-                        ball_positions.append(ball_detections[0])
 
 
 
