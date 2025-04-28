@@ -69,10 +69,17 @@ class BallHandler:
                 self.incomplete_ball_positions[i] = new_det
 
 
-    def handle_ball_tracking(self):
+    def handle_ball_tracking(self, read_from_stub = True, stub_path = None):
+        if read_from_stub and stub_path is not None and os.path.exists(stub_path):
+            with open(stub_path, 'rb') as f:
+                final_frame_result, player_in_possession_buffer = pickle.load(f)
+                print("found ball tracking stub")
+                return final_frame_result, player_in_possession_buffer
+
         self.fill_missing_positions()
 
         final_frame_result = []
+        player_in_possession_buffer = []
         for frame_num, frame in enumerate(tqdm(self.annotated_frames, desc="Processing Ball Tracking Frames")):
             # track player in possession of ball if within distance
             player_in_possession = None
@@ -81,21 +88,29 @@ class BallHandler:
                                                                               players=self.player_positions[frame_num])
             if player_in_possession != -1:
                 player_in_possession = self.player_positions[frame_num][self.player_positions[frame_num].tracker_id == player_in_possession]
-                player_in_possession.xyxy = sv.pad_boxes(xyxy=player_in_possession.xyxy, px=10)
 
             # go thru annotated frames and annotate the ball
             frame = self.ball_annotator.annotate(frame, self.incomplete_ball_positions[frame_num])
-            #frame = self.triangle_annotator.annotate(frame, self.incomplete_ball_positions[frame_num])
 
             # go thru annotated frames and annotate the player in possession of ball
             if isinstance(player_in_possession, sv.Detections):
                 frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
+                player_in_possession_buffer.append(player_in_possession.tracker_id)
+            else:
+                player_in_possession_buffer.append(None)
 
 
             final_frame_result.append(frame)
 
 
-        return final_frame_result
+
+
+        if stub_path is not None:
+            with open(stub_path, 'wb') as f:
+                pickle.dump((final_frame_result, player_in_possession_buffer), f)
+
+
+        return final_frame_result, player_in_possession_buffer
 
 
 
@@ -109,6 +124,7 @@ class Tracker:
         self.ball_model = YOLO(ball_model_path)
         print(self.ball_model.names)
         self.tracker = sv.ByteTrack()
+
         self.ball_tracker = BallTracker(buffer_size=20)
         self.w, self.h = w,h
 
@@ -150,18 +166,6 @@ class Tracker:
 
 
 
-
-
-    def add_postiton_to_tracks(self, tracks):
-        for object, object_tracks in tracks.items():
-            for frame_num, track in enumerate(object_tracks):
-                for track_id, track_info in track.items():
-                    bbox = track_info['bbox']
-                    if object == 'ball':
-                        position = get_center_of_bbox(bbox)
-                    else:
-                        position = get_foot_pos(bbox)
-                    tracks[object][frame_num][track_id]['position'] = position
 
 
 

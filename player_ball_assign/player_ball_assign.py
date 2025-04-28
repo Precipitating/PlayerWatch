@@ -5,7 +5,7 @@ from utils import get_center_of_bbox, measure_dist
 
 class PlayerBallAssign():
     def __init__(self):
-        self.max_player_ball_dist = 70
+        self.max_player_ball_dist = 50
 
     def assign_ball_to_player(self, players, ball_bbox):
         ball_pos = get_center_of_bbox(ball_bbox)
