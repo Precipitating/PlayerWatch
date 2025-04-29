@@ -16,7 +16,7 @@ def save_video(source_path, target_path, frames):
     width, height = video_info.resolution_wh
 
     # Define the video writer
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(target_path, fourcc, fps, (width, height))
 
     for frame in frames:

@@ -14,7 +14,7 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 def main():
 
     input_video_path = 'input_videos/vid.mp4'
-    output_video_path = 'output_videos/output.avi'
+    output_video_path = 'output_videos/output.mp4'
     video_info = sv.VideoInfo.from_video_path(input_video_path)
     w, h = video_info.width, video_info.height
     tracker = Tracker('models/main/repobest.pt','models/ball/640/best.pt', w= w, h= h)
@@ -56,7 +56,7 @@ def main():
     video_splitter.crop_videos()
 
 
-    #save_video(input_video_path, output_video_path, ball_annotated_frames)
+    save_video(input_video_path, output_video_path, ball_annotated_frames)
 
 
 

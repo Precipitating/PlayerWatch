@@ -88,6 +88,9 @@ class BallHandler:
                                                                               players=self.player_positions[frame_num])
             if player_in_possession != -1:
                 player_in_possession = self.player_positions[frame_num][self.player_positions[frame_num].tracker_id == player_in_possession]
+                player_in_possession_buffer.append(player_in_possession.tracker_id)
+            else:
+                player_in_possession_buffer.append(None)
 
             # go thru annotated frames and annotate the ball
             frame = self.ball_annotator.annotate(frame, self.incomplete_ball_positions[frame_num])
@@ -95,9 +98,6 @@ class BallHandler:
             # go thru annotated frames and annotate the player in possession of ball
             if isinstance(player_in_possession, sv.Detections):
                 frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
-                player_in_possession_buffer.append(player_in_possession.tracker_id)
-            else:
-                player_in_possession_buffer.append(None)
 
 
             final_frame_result.append(frame)
@@ -249,65 +249,32 @@ class Tracker:
             if len(frame_batch) >= batch_size:
                 # if batch size reached process it
                 detections_batch = self.model.predict(frame_batch, conf= 0.3)
-                #ball_detections_batch = self.ball_model.predict(frame_batch, conf= 0.3)
 
                 # process each frame in batch
                 for frame_in_batch, detections in zip(frame_batch, detections_batch):
-
-                    detections = sv.Detections.from_ultralytics(detections)
-
-                    #ball_detections = detections[detections.class_id == BALL_ID]
-                   # ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=10)
-
-
-
-
-                    all_detections = detections[detections.class_id != BALL_ID]
-                    all_detections = all_detections.with_nms(threshold=0.5, class_agnostic=True)
-                    all_detections = self.tracker.update_with_detections(all_detections)
-
-                    players_detections = all_detections[all_detections.class_id == PLAYER_ID]
-                    player_positions.append(copy.deepcopy(players_detections))
-
-
-
-                    goalkeepers_detections = all_detections[all_detections.class_id == GOALKEEPER_ID]
-                    referees_detections = all_detections[all_detections.class_id == REFEREE_ID]
-
-
-                    players_crops = [sv.crop_image(frame_in_batch, xyxy) for xyxy in players_detections.xyxy]
-                    players_detections.class_id = team_classifier.predict(players_crops)
-
-                    goalkeepers_detections.class_id = self.resolve_goalkeepers_team_id(players_detections, goalkeepers_detections)
-
-                    referees_detections.class_id -= 1
-
-                    all_detections = sv.Detections.merge([players_detections, goalkeepers_detections, referees_detections])
-
-
-
-                    labels = [
-                        f"#{tracker_id}"
-                        for tracker_id
-                        in all_detections.tracker_id
-                    ]
-                    all_detections.class_id = all_detections.class_id.astype(int)
-
-                    # draw annotations
-                    annotated_frame = frame_in_batch.copy()  # copy the frame to not modify the original one
-                    annotated_frame = self.ellipse_annotator.annotate(annotated_frame, all_detections)
-                    annotated_frame = self.label_annotator.annotate(annotated_frame, all_detections,labels)
-                   # annotated_frame = self.triangle_annotator.annotate(annotated_frame, ball_detections)
-
-
-                    # Append annotated frame to results
-                    annotated_result.append(annotated_frame)
-
+                    self.process_frame_batch(detections= detections,
+                                             frame_in_batch= frame_in_batch,
+                                             team_classifier= team_classifier,
+                                             annotated_result= annotated_result,
+                                             player_positions= player_positions
+                                             )
                 # Reset the batch
                 frame_batch = []
 
+            # handle rest of frames
+        if len(frame_batch) > 0:
+            print("processing rest of the frames")
+            detections_batch = self.model.predict(frame_batch, conf=0.3)
+            # process each frame in batch
+            for frame_in_batch, detections in zip(frame_batch, detections_batch):
+                self.process_frame_batch(detections=detections,
+                                         frame_in_batch=frame_in_batch,
+                                         team_classifier=team_classifier,
+                                         annotated_result=annotated_result,
+                                         player_positions=player_positions
+                                         )
 
-
+            frame_batch = []
 
 
 
@@ -317,6 +284,47 @@ class Tracker:
 
 
         return annotated_result, ball_positions, player_positions
+
+
+
+
+    def process_frame_batch(self, detections, frame_in_batch, team_classifier, annotated_result, player_positions):
+
+        detections = sv.Detections.from_ultralytics(detections)
+
+        all_detections = detections[detections.class_id != BALL_ID]
+        all_detections = all_detections.with_nms(threshold=0.5, class_agnostic=True)
+        all_detections = self.tracker.update_with_detections(all_detections)
+
+        players_detections = all_detections[all_detections.class_id == PLAYER_ID]
+        player_positions.append(copy.deepcopy(players_detections))
+
+        goalkeepers_detections = all_detections[all_detections.class_id == GOALKEEPER_ID]
+        referees_detections = all_detections[all_detections.class_id == REFEREE_ID]
+
+        players_crops = [sv.crop_image(frame_in_batch, xyxy) for xyxy in players_detections.xyxy]
+        players_detections.class_id = team_classifier.predict(players_crops)
+
+        goalkeepers_detections.class_id = self.resolve_goalkeepers_team_id(players_detections, goalkeepers_detections)
+
+        referees_detections.class_id -= 1
+
+        all_detections = sv.Detections.merge([players_detections, goalkeepers_detections, referees_detections])
+
+        labels = [
+            f"#{tracker_id}"
+            for tracker_id
+            in all_detections.tracker_id
+        ]
+        all_detections.class_id = all_detections.class_id.astype(int)
+
+        # draw annotations
+        annotated_frame = frame_in_batch.copy()  # copy the frame to not modify the original one
+        annotated_frame = self.ellipse_annotator.annotate(annotated_frame, all_detections)
+        annotated_frame = self.label_annotator.annotate(annotated_frame, all_detections, labels)
+
+        # Append annotated frame to results
+        annotated_result.append(annotated_frame)
 
 
 
