@@ -15,105 +15,106 @@ class VideoSplitter:
 
 
     def is_possession_consistent(self, current_idx, steps_ahead=10, forgive_frames=3):
-        if current_idx + steps_ahead > len(self.tracker_array):
+        # ensure we're not going over the video's length
+        if current_idx > len(self.tracker_array):
             return False
 
-        result = True
-        current_tracker_id = self.tracker_array[current_idx][0]
+        # ensure we're not comparing against no-one possessing the ball
+        tracking = self.tracker_array[current_idx]
+        if tracking is None:
+            return False
+
+        target_id = tracking[0]
         error_count = 0
 
-        for i in range(current_idx, current_idx + steps_ahead):
-
-            if error_count >= forgive_frames:
-                result = False
-                break
-
-            if self.tracker_array[i] is None or self.tracker_array[i][0] != current_tracker_id:
+        for i in range(current_idx, min(current_idx + steps_ahead, len(self.tracker_array))):
+            tracking_i = self.tracker_array[i]
+            if tracking_i is None or tracking_i[0] != target_id:
                 error_count += 1
+                if error_count > forgive_frames:
+                    return False
 
-        return result
+        return True
 
 
 
-    def handle_end_point(self, current_trim_frames, current_tracked_player, frame_idx):
+    def handle_end_point(self, trim_frames, player_id, frame_idx):
         print("end point reached")
-        curr_output_dir = f"{self.output_dir}\\{current_tracked_player}"
-        output_video_dir = f"{curr_output_dir}\\{frame_idx}.mp4"
-        print(output_video_dir)
-        if not os.path.exists(curr_output_dir):
-            os.makedirs(curr_output_dir)
-        save_video(source_path=self.source_path, target_path=output_video_dir, frames=current_trim_frames)
-        current_tracked_player = -1
-        current_trim_frames = []
 
-        # reset variables
-        return -1, current_tracked_player, current_trim_frames
+        if not trim_frames:
+            print("No frames to save for player", player_id)
+            return
+
+        output_dir = os.path.join(self.output_dir, str(player_id))
+        os.makedirs(output_dir, exist_ok=True)
+
+        output_path = os.path.join(output_dir, f"{frame_idx}.mp4")
+        print(f"Saving clip for player {player_id} to: {output_path}")
+
+        save_video(
+            source_path=self.source_path,
+            target_path=output_path,
+            frames=trim_frames
+        )
 
     def crop_videos(self):
+        current_player = None
+        trim_frames = []
+        grace_counter = 0
+        grace_active = False
 
-       # clean_video_frames = list(self.frame_gen)
-
-        frame_start = -1
-        current_tracked_player = -1
-        current_trim_frames = []
-        current_grace_period = -1
         for frame_idx, frame in enumerate(tqdm(self.frame_gen, desc="Cropping videos")):
+            tracker_info = self.tracker_array[frame_idx]
+            tracked_id = tracker_info[0] if tracker_info else None
 
-            # if we're in a grace period just keep adding frames
-            if current_grace_period != -1:
-                if current_grace_period > 0:
-                    current_trim_frames.append(frame)
-                    current_grace_period -= 1
-                    continue
-                else:
-                    if current_grace_period == 0:
-                        current_trim_frames.append(frame)
-                        frame_start, current_tracked_player, current_trim_frames = self.handle_end_point(
-                            current_trim_frames=current_trim_frames,
-                            current_tracked_player=current_tracked_player,
-                            frame_idx=frame_idx
-                            )
-                        print("cropped vid saved")
-                        current_grace_period = -1
+            # if we're in a grace period
+            if grace_active:
+                trim_frames.append(frame)
+                grace_counter -= 1
 
-            # if we're already tracking a player and tracker doesn't detect a possessor, just append frame and continue
-            if self.tracker_array[frame_idx] is None:
-                if current_tracked_player != -1:
-                    current_trim_frames.append(frame)
+                if grace_counter <= 0:
+                    self.handle_end_point(trim_frames, current_player, frame_idx)
+                    print("Cropped video saved")
+                    current_player = None
+                    trim_frames = []
+                    grace_active = False
                 continue
 
-            # if we keep hitting same tracker id on the player we're already tracking just append and continue
-            if self.tracker_array[frame_idx][0] == current_tracked_player:
-                current_trim_frames.append(frame)
+            # if we’re not tracking anyone yet
+            if current_player is None:
+                if tracked_id is not None and self.is_possession_consistent(
+                        current_idx=frame_idx,
+                        steps_ahead=self.frames_considered_possession,
+                        forgive_frames=self.ball_frame_forgiveness
+                ):
+                    current_player = tracked_id
+                    trim_frames.append(frame)
                 continue
 
-            # check if we have a ball possessor that is atleast possessing for steps_ahead frames
-            frame_valid = self.is_possession_consistent(current_idx=frame_idx,
-                                                        steps_ahead=self.frames_considered_possession,
-                                                        forgive_frames=self.ball_frame_forgiveness)
+            # if tracking the same player
+            if tracked_id == current_player:
+                trim_frames.append(frame)
+                continue
 
-            # if so, make it the current tracked player, else we found the clip end.
-            if frame_valid:
-                if frame_start == -1:
-                    frame_start = frame_idx
-                    current_tracked_player = self.tracker_array[frame_idx][0]
-                # found end point, save it to its own folder.
-                elif self.tracker_array[frame_idx][0] != current_tracked_player:
-                    # add a grace period, we don't want to instantly trim as the new possessor needs time to control
-                    if current_grace_period == -1:
-                        current_grace_period = self.possessor_grace_period
-                        continue
+            # if another player is consistently possessing — begin grace period
+            if tracked_id is not None and self.is_possession_consistent(
+                    current_idx=frame_idx,
+                    steps_ahead=self.frames_considered_possession,
+                    forgive_frames=self.ball_frame_forgiveness
+            ):
+                grace_active = True
+                grace_counter = self.possessor_grace_period
+                trim_frames.append(frame)
+                continue
+
+            # if no possessor or inconsistent — still tracking current player
+            if current_player is not None:
+                trim_frames.append(frame)
+
+        # handle hanging clip
+        if current_player is not None and trim_frames:
+            self.handle_end_point(trim_frames, current_player, len(self.tracker_array))
 
 
-
-            if current_tracked_player != -1:
-                current_trim_frames.append(frame)
-
-        # we still have a hanging clip, end it if it ends without finding another possessor
-        if current_tracked_player != -1:
-            self.handle_end_point(current_trim_frames=current_trim_frames,
-                                  current_tracked_player=current_tracked_player,
-                                  frame_idx=len(self.tracker_array)
-                                  )
 
 
