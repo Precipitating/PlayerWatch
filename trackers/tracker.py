@@ -23,11 +23,11 @@ PLAYER_ID = 2
 REFEREE_ID = 3
 
 class BallHandler:
-    def __init__(self, incomplete_ball_positions, annotated_frames, player_positions):
+    def __init__(self, incomplete_ball_positions, annotated_frames, player_positions, ball_dist):
         self.incomplete_ball_positions = incomplete_ball_positions
         self.complete_ball_positions = []
         self.annotated_frames = annotated_frames
-        self.player_assigner = player_ball_assign.PlayerBallAssign()
+        self.player_assigner = player_ball_assign.PlayerBallAssign(ball_dist)
         self.player_positions = player_positions
         self.ball_annotator = BallAnnotator(radius=7, buffer_size=10)
 

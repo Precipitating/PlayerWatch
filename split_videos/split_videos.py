@@ -3,11 +3,15 @@ import os
 from utils import save_video
 
 
-class VideoSplitter():
-    def __init__(self, tracker_array, frame_gen, source_path):
+class VideoSplitter:
+    def __init__(self, tracker_array, frame_gen, source_path, grace_period, frames_considered_possession, output_folder, ball_frame_forgiveness):
         self.tracker_array = tracker_array
         self.frame_gen = frame_gen
         self.source_path = source_path
+        self.possessor_grace_period = grace_period
+        self.frames_considered_possession = frames_considered_possession
+        self.ball_frame_forgiveness = ball_frame_forgiveness
+        self.output_dir = output_folder
 
 
     def is_possession_consistent(self, current_idx, steps_ahead=10, forgive_frames=3):
@@ -32,10 +36,12 @@ class VideoSplitter():
 
 
     def handle_end_point(self, current_trim_frames, current_tracked_player, frame_idx):
-        output_dir = f"output_videos/{current_tracked_player}"
-        output_video_dir = f"output_videos/{current_tracked_player}/{frame_idx}.mp4"
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        print("end point reached")
+        curr_output_dir = f"{self.output_dir}\\{current_tracked_player}"
+        output_video_dir = f"{curr_output_dir}\\{frame_idx}.mp4"
+        print(output_video_dir)
+        if not os.path.exists(curr_output_dir):
+            os.makedirs(curr_output_dir)
         save_video(source_path=self.source_path, target_path=output_video_dir, frames=current_trim_frames)
         current_tracked_player = -1
         current_trim_frames = []
@@ -67,6 +73,7 @@ class VideoSplitter():
                             current_tracked_player=current_tracked_player,
                             frame_idx=frame_idx
                             )
+                        print("cropped vid saved")
                         current_grace_period = -1
 
             # if we're already tracking a player and tracker doesn't detect a possessor, just append frame and continue
@@ -81,7 +88,9 @@ class VideoSplitter():
                 continue
 
             # check if we have a ball possessor that is atleast possessing for steps_ahead frames
-            frame_valid = self.is_possession_consistent(current_idx=frame_idx, steps_ahead=20, forgive_frames=3)
+            frame_valid = self.is_possession_consistent(current_idx=frame_idx,
+                                                        steps_ahead=self.frames_considered_possession,
+                                                        forgive_frames=self.ball_frame_forgiveness)
 
             # if so, make it the current tracked player, else we found the clip end.
             if frame_valid:
@@ -92,7 +101,7 @@ class VideoSplitter():
                 elif self.tracker_array[frame_idx][0] != current_tracked_player:
                     # add a grace period, we don't want to instantly trim as the new possessor needs time to control
                     if current_grace_period == -1:
-                        current_grace_period = 30
+                        current_grace_period = self.possessor_grace_period
                         continue
 
 
