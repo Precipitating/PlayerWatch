@@ -11,6 +11,8 @@ import torch
 from nicegui import ui, app, background_tasks, run
 import webview
 import os
+from audio_crop import AudioCrop
+from concurrent.futures import ThreadPoolExecutor
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -26,7 +28,8 @@ config = {
     'crop_frame_skip': 2,
     'frames_considered_possession': 20,
     'ball_frame_forgiveness': 3,
-    'is_running': False,
+    'audio_crop': False,
+    'audio_crop_player_name': ''
 }
 
 async def choose_file(button, input_video = False,ball_model = False, player_model = False):
@@ -70,16 +73,27 @@ async def choose_output_folder(button):
 
 
 
+def start_audio_crop(config):
+    if config['input_video_path'] and config['output_video_path']:
+        audio_crop = AudioCrop(target_name=config['audio_crop_player_name'],
+                               input_file=config['input_video_path'],
+                               output_dir=config['output_video_path'])
+        # audio cropping method selected, find player name and fixed duration crop
+        timestamps = audio_crop.start_transcription(start_time_offset=-2, crop_duration=5)
+
+        audio_crop.start_cropping(timestamps= timestamps)
+
 
 
 
 def run_program(config):
-    if config.get('is_running', False) or not all(config.get(key) not in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path', 'ball_model_path']):
+    # AI detection method via ball tracking
+    if not all(config.get(key) not in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path', 'ball_model_path']):
+        ui.notify('ERROR: Not all inputs set')
         print(f"RUN PROGRAM ERROR")
         return
 
     # Update the config to mark the program as running
-    config['is_running'] = True
     config['annotated_video_path'] = os.path.join(config['output_video_path'], 'output.mp4')
 
     # Fetch video info
@@ -136,7 +150,6 @@ def run_program(config):
     save_video(config['input_video_path'], config['annotated_video_path'], ball_annotated_frames)
 
     # Mark the process as finished
-    config['is_running'] = False
     print("Done")
 
 
@@ -189,15 +202,27 @@ def main():
             ui.number(label="Ball Error Forgiveness", value=config['ball_frame_forgiveness'], step=1, precision=0,
                       on_change=lambda e: (config.update({'ball_frame_forgiveness': int(e.value)}),
                                            print(f"Ball frame forgiveness set to: {e.value}")))
-
+        ui.separator()
+        with ui.grid(columns=2).classes('items-center'):
+            ai_audio_crop = ui.checkbox('Audio AI Crop', on_change= lambda e: config.update({'audio_crop': e.value}))
+            player_name_text_box = ui.input(placeholder= "Shirt Name",
+                                            validation={"Name too long": lambda value: len(value) < 22},
+                                            on_change= lambda e: config.update({'audio_crop_player_name': e.value.strip()})).props('rounded outlined dense').props('dense').classes('mt-4').bind_enabled_from(ai_audio_crop, 'value')
         ui.separator()
         with ui.row().classes('w-full justify-center'):
             async def run_main_async():
                 spinner.visible = True
-                await run.cpu_bound(run_program, config.copy())
-                spinner.visible = False
+                run_button.disable()
+                if config['audio_crop']:
+                    print(config['audio_crop_player_name'])
+                    await run.cpu_bound(start_audio_crop, config.copy())
+                else:
+                    await run.cpu_bound(run_program, config.copy())
 
-            ui.button('Run', on_click=lambda: background_tasks.create(run_main_async()))
+                spinner.visible = False
+                run_button.enable()
+
+            run_button = ui.button('Run', on_click=lambda: background_tasks.create(run_main_async()))
 
         with ui.row().classes('w-full justify-center'):
             spinner = ui.spinner()
