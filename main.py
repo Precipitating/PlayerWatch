@@ -1,5 +1,3 @@
-import cv2
-
 from trackers.tracker import BallHandler
 from utils import read_video, save_video
 from trackers import Tracker
@@ -12,7 +10,7 @@ from nicegui import ui, app, background_tasks, run
 import webview
 import os
 from audio_crop import AudioCrop
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -70,18 +68,6 @@ async def choose_output_folder(button):
         ui.notify("Output Folder Set")
         config['output_video_path'] = files[0]
         button.classes('bg-green', remove='bg-red')
-
-
-
-def start_audio_crop(config):
-    if config['input_video_path'] and config['output_video_path']:
-        audio_crop = AudioCrop(target_name=config['audio_crop_player_name'],
-                               input_file=config['input_video_path'],
-                               output_dir=config['output_video_path'])
-        # audio cropping method selected, find player name and fixed duration crop
-        timestamps = audio_crop.start_transcription(start_time_offset=-2, crop_duration=5)
-
-        audio_crop.start_cropping(timestamps= timestamps)
 
 
 
@@ -153,8 +139,38 @@ def run_program(config):
     print("Done")
 
 
+async def run_main_async(button, spinner):
+    with disable(button, spinner):
+        if config['audio_crop']:
+            if config['input_video_path'] and config['output_video_path']:
+                audio_crop = AudioCrop(target_name=config['audio_crop_player_name'],
+                                       input_file=config['input_video_path'],
+                                       output_dir=config['output_video_path'])
+                try:
+                    await run.cpu_bound(audio_crop.start_transcription, -2, 5)
+                    print("Done ")
+                except Exception as e:
+                    print('Error during transcription:', e)
+                    ui.notify(f'Error: {e}')
+        else:
+            await run.cpu_bound(run_program, config.copy())
+
+@contextmanager
+def disable(button: ui.button, spinner: ui.spinner):
+    button.disable()
+    spinner.visible = True
+    try:
+        yield
+    finally:
+        button.enable()
+        spinner.visible = False
+
+
+
+
 def main():
     ui.dark_mode().enable()
+
     with ui.card():
         with ui.row().classes('w-full justify-center'):
             ui.label("Player Watch:")
@@ -210,23 +226,11 @@ def main():
                                             on_change= lambda e: config.update({'audio_crop_player_name': e.value.strip()})).props('rounded outlined dense').props('dense').classes('mt-4').bind_enabled_from(ai_audio_crop, 'value')
         ui.separator()
         with ui.row().classes('w-full justify-center'):
-            async def run_main_async():
-                spinner.visible = True
-                run_button.disable()
-                if config['audio_crop']:
-                    print(config['audio_crop_player_name'])
-                    await run.cpu_bound(start_audio_crop, config.copy())
-                else:
-                    await run.cpu_bound(run_program, config.copy())
-
-                spinner.visible = False
-                run_button.enable()
-
-            run_button = ui.button('Run', on_click=lambda: background_tasks.create(run_main_async()))
+            run_button = ui.button('Run', on_click=lambda e: run_main_async(run_button, processing_spinner))
 
         with ui.row().classes('w-full justify-center'):
-            spinner = ui.spinner()
-            spinner.visible = False
+            processing_spinner = ui.spinner()
+            processing_spinner.visible = False
 
 
 
