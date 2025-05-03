@@ -26,8 +26,15 @@ config = {
     'crop_frame_skip': 2,
     'frames_considered_possession': 20,
     'ball_frame_forgiveness': 3,
+
     'audio_crop': False,
-    'audio_crop_player_name': ''
+    'ball_track_crop': False,
+    'audio_crop_player_name': '',
+    'whisper_model': 'small',
+    'whisper_processes': 4,
+    'audio_start_time_offset': -2,
+    'audio_crop_duration': 5,
+    'audio_word_similarity': 70
 }
 
 async def choose_file(button, input_video = False,ball_model = False, player_model = False):
@@ -139,21 +146,35 @@ def run_program(config):
     print("Done")
 
 
+async def run_audio_crop_program(config):
+    if config['input_video_path'] and config['output_video_path'] and config['audio_crop_player_name']:
+        audio_crop = AudioCrop(target_name=config['audio_crop_player_name'],
+                               input_file=config['input_video_path'],
+                               output_dir=config['output_video_path'],
+                               processors=config['whisper_processes'])
+        try:
+            await run.cpu_bound(audio_crop.start_transcription,
+                                config['audio_start_time_offset'],
+                                config['audio_crop_duration'],
+                                config['audio_word_similarity'])
+            ui.notify("Complete")
+            print("Done ")
+        except Exception as e:
+            print('Error during transcription:', e)
+            ui.notify(f'Error: {e}')
+    else:
+        ui.notify('Parameters not filled/correct')
+
+
+
 async def run_main_async(button, spinner):
     with disable(button, spinner):
         if config['audio_crop']:
-            if config['input_video_path'] and config['output_video_path']:
-                audio_crop = AudioCrop(target_name=config['audio_crop_player_name'],
-                                       input_file=config['input_video_path'],
-                                       output_dir=config['output_video_path'])
-                try:
-                    await run.cpu_bound(audio_crop.start_transcription, -2, 5)
-                    print("Done ")
-                except Exception as e:
-                    print('Error during transcription:', e)
-                    ui.notify(f'Error: {e}')
-        else:
+            await run_audio_crop_program(config.copy())
+        elif config['ball_track_crop']:
             await run.cpu_bound(run_program, config.copy())
+        else:
+            ui.notify("Select a method.")
 
 @contextmanager
 def disable(button: ui.button, spinner: ui.spinner):
@@ -176,7 +197,7 @@ def main():
             ui.label("Player Watch:")
 
         ui.separator()
-
+        # INPUTS
         with ui.grid(columns=2).classes('items-center gap-4'):
 
             ui.label("Input Video:").classes("self-center")
@@ -191,39 +212,119 @@ def main():
             ui.label("Ball Detection Model:").classes("self-center")
             ball_model_button = ui.button('Browse', on_click= lambda: choose_file(button= ball_model_button, ball_model= True)).classes('text-sm px-6 py-1 bg-red')
 
-
         ui.separator()
+        # CHOOSE METHOD
+        with ui.grid(columns=2).classes('items-center'):
+            def toggle_checkbox(self, other_checkbox):
+                if self.value:
+                    other_checkbox.disable()
+                else:
+                    other_checkbox.enable()
 
-        with ui.grid(columns=2).classes('items-center gap-4'):
-            ui.number(label="Grace Period (frames)", value=config['grace_period'], step=1, precision=0,
+
+            ai_audio_crop = ui.checkbox('Audio-Based Clipping', on_change= lambda e: config.update({'audio_crop': e.value}))
+            ai_ball_detection = ui.checkbox('Ball-Tracking Clipping', on_change= lambda e: config.update({'ball_track_crop': e.value}))
+            ai_audio_crop.on_value_change(lambda: toggle_checkbox(ai_audio_crop, ai_ball_detection))
+            ai_ball_detection.on_value_change(lambda: toggle_checkbox(ai_ball_detection, ai_audio_crop))
+
+        # PARAMETER CHOOSING
+        # AUDIO METHOD
+        ui.separator()
+        with ui.row().classes('w-full justify-center'):
+            with ui.dropdown_button('Model:', auto_close=True).bind_visibility_from(ai_audio_crop, 'value'):
+                ui.item('tiny', on_click=lambda: config.update({'whisper_model': 'tiny'}))
+                ui.item('small', on_click=lambda e: config.update({'whisper_model': 'small'}))
+                ui.item('medium', on_click=lambda e: config.update({'whisper_model': 'medium'}))
+                ui.item('large-v3-turbo', on_click=lambda e: config.update({'whisper_model': 'large-v3-turbo'}))
+
+        with ui.grid(columns=2).classes('items-center').bind_visibility_from(ai_audio_crop, 'value'):
+            ui.number(label="Processes",
+                      value=config['whisper_processes'],
+                      step=1,
+                      precision=0,
+                      on_change=lambda e: (config.update({'whisper_processes': int(e.value)}),
+                                           print(f"Processes set to: {e.value}")))
+
+            ui.number(label="Start time offset",
+                      value=config['audio_start_time_offset'],
+                      step=1,
+                      precision=0,
+                      suffix='s',
+                      on_change=lambda e: (config.update({'audio_start_time_offset': int(e.value)}),
+                                           print(f"Start time offset set to: {e.value}")))
+
+            ui.number(label="Crop length",
+                      value=config['audio_crop_duration'],
+                      step=1,
+                      precision=0,
+                      min=0,
+                      suffix='s',
+                      on_change=lambda e: (config.update({'audio_crop_duration': int(e.value)}),
+                                           print(f"Crop duration set to: {e.value}")))
+            ui.number(label="Name Match %",
+                      value=config['audio_word_similarity'],
+                      step=5,
+                      precision=0,
+                      min=1,
+                      max = 100,
+                      suffix='%',
+                      on_change=lambda e: (config.update({'audio_word_similarity': int(e.value)}),
+                                           print(f"Audio word similarity set to: {e.value}")))
+        with ui.row().classes('w-full justify-center').bind_visibility_from(ai_audio_crop, 'value'):
+            ui.input(placeholder="Shirt Name",
+                     validation={"Name too long": lambda value: len(value) < 22},
+                     on_change=lambda e: config.update({'audio_crop_player_name': e.value.strip()})).props('rounded outlined dense').props('dense')
+
+
+
+
+        # BALL TRACK METHOD
+        with ui.grid(columns=2).classes('items-center gap-4').bind_visibility_from(ai_ball_detection, 'value'):
+            ui.number(label="Grace Period",
+                      value=config['grace_period'],
+                      step=1,
+                      precision=0,
+                      suffix='fr',
                       on_change=lambda e: (config.update({'grace_period': int(e.value)}),
                                            print(f"Grace period set to: {e.value}")))
 
-            ui.number(label="Player -> Ball distance", value=config['player_to_ball_dist'], step=1, precision=0,
+            ui.number(label="Player -> Ball distance", 
+                      value=config['player_to_ball_dist'],
+                      step=1,
+                      precision=0,
                       on_change=lambda e: (config.update({'player_to_ball_dist': int(e.value)}),
                                            print(f"Player → Ball distance set to: {e.value}")))
 
-            ui.number(label="Frame Batch Size", value=config['batch_size'], step=5, precision=0,
+            ui.number(label="Frame Batch Size",
+                      value=config['batch_size'],
+                      step=5,
+                      precision=0,
+                      suffix='fr',
                       on_change=lambda e: (config.update({'batch_size': int(e.value)}),
                                            print(f"Batch size set to: {e.value}")))
 
-            ui.number(label="Classifier Frame Skip", value=config['crop_frame_skip'], step=1, precision=0,
+            ui.number(label="Classifier Frame Skip", value=config['crop_frame_skip'],
+                      step=1,
+                      precision=0,
+                      suffix='fr',
                       on_change=lambda e: (config.update({'crop_frame_skip': int(e.value)}),
                                            print(f"Classifier frame skip set to: {e.value}")))
 
-            ui.number(label="Possession threshold", value=config['frames_considered_possession'], step=1, precision=0,
+            ui.number(label="Possession threshold",
+                      value=config['frames_considered_possession'],
+                      step=1,
+                      precision=0,
+                      suffix='fr',
                       on_change=lambda e: (config.update({'frames_considered_possession': int(e.value)}),
                                            print(f"Possession threshold set to: {e.value}")))
 
-            ui.number(label="Ball Error Forgiveness", value=config['ball_frame_forgiveness'], step=1, precision=0,
+            ui.number(label="Ball Error Forgiveness",
+                      value=config['ball_frame_forgiveness'],
+                      step=1,
+                      precision=0,
+                      suffix='fr',
                       on_change=lambda e: (config.update({'ball_frame_forgiveness': int(e.value)}),
                                            print(f"Ball frame forgiveness set to: {e.value}")))
-        ui.separator()
-        with ui.grid(columns=2).classes('items-center'):
-            ai_audio_crop = ui.checkbox('Audio AI Crop', on_change= lambda e: config.update({'audio_crop': e.value}))
-            player_name_text_box = ui.input(placeholder= "Shirt Name",
-                                            validation={"Name too long": lambda value: len(value) < 22},
-                                            on_change= lambda e: config.update({'audio_crop_player_name': e.value.strip()})).props('rounded outlined dense').props('dense').classes('mt-4').bind_enabled_from(ai_audio_crop, 'value')
         ui.separator()
         with ui.row().classes('w-full justify-center'):
             run_button = ui.button('Run', on_click=lambda e: run_main_async(run_button, processing_spinner))
@@ -236,9 +337,9 @@ def main():
 
 
     app.native.window_args['resizable'] = False
-    ui.run(native=True, window_size=(430,830))
+    ui.run(native=True, window_size=(430,830), reload= False)
 
 
 
-if __name__ in {"__main__", "__mp_main__"}:
+if __name__ in "__main__":
     main()
