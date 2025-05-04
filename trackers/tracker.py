@@ -1,18 +1,13 @@
 import copy
-
-import cv2
 from ultralytics import YOLO
 import supervision as sv
 import pickle
 import os
-import cv2
 import sys
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-
 import player_ball_assign
-from utils import get_center_of_bbox, get_bbox_width, get_foot_pos
 from sports.common.ball import BallTracker, BallAnnotator
 
 sys.path.append('../')
@@ -106,6 +101,7 @@ class BallHandler:
 
 
         if stub_path is not None:
+            os.makedirs(os.path.dirname(stub_path), exist_ok=True)
             with open(stub_path, 'wb') as f:
                 pickle.dump((final_frame_result, player_in_possession_buffer), f)
 
@@ -279,9 +275,9 @@ class Tracker:
 
 
         if stub_path is not None:
+            os.makedirs(os.path.dirname(stub_path), exist_ok=True)
             with open(stub_path, 'wb') as f:
                 pickle.dump((annotated_result, ball_positions, player_positions), f)
-
 
         return annotated_result, ball_positions, player_positions
 

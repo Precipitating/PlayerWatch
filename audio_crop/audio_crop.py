@@ -1,10 +1,8 @@
-#from faster_whisper import WhisperModel
 from pywhispercpp.model import Model
 import torch
 from rapidfuzz import fuzz
 import ffmpeg
 import os
-import uuid
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -40,7 +38,7 @@ class AudioCrop:
     def start_cropping(self, start, end):
         new_folder_path = os.path.join(self.output_dir, self.target_name)
         os.makedirs(new_folder_path, exist_ok=True)
-        output_path = os.path.join(new_folder_path, f"{uuid.uuid4()}.mp4")
+        output_path = os.path.join(new_folder_path, f"{start}.mp4")
         print(output_path)
         ffmpeg.input(self.input_video, ss=start, to=end).output(output_path).run()
 

@@ -15,6 +15,7 @@ from contextlib import contextmanager
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 config = {
+    'prev_input_video_path': '',
     'input_video_path': '',
     'output_video_path': '',
     'annotated_video_path': '',
@@ -67,14 +68,28 @@ async def choose_file(button, input_video = False,ball_model = False, player_mod
 
 
 
-
-
 async def choose_output_folder(button):
     files = await app.native.main_window.create_file_dialog(dialog_type= webview.FOLDER_DIALOG)
     if files:
         ui.notify("Output Folder Set")
         config['output_video_path'] = files[0]
         button.classes('bg-green', remove='bg-red')
+
+
+def delete_stubs():
+    # delete stubs if new video
+    if config['prev_input_video_path'] != config['input_video_path']:
+        path = os.path.join(os.getcwd(), 'stubs')
+        if os.path.isdir(path):
+            for filename in os.listdir(path):
+                file_path = os.path.join(path, filename)
+                if os.path.isfile(file_path) and filename.lower().endswith('.pk1'):
+                    os.remove(file_path)
+                    print("Deleted existing stubs for new video file")
+                    ui.notify('Deleted old stubs for new video')
+
+
+    config['prev_input_video_path'] = config['input_video_path']
 
 
 
@@ -86,7 +101,7 @@ def run_program(config):
         print(f"RUN PROGRAM ERROR")
         return
 
-    # Update the config to mark the program as running
+    # Output path
     config['annotated_video_path'] = os.path.join(config['output_video_path'], 'output.mp4')
 
     # Fetch video info
@@ -172,6 +187,7 @@ async def run_main_async(button, spinner):
         if config['audio_crop']:
             await run_audio_crop_program(config.copy())
         elif config['ball_track_crop']:
+            delete_stubs()
             await run.cpu_bound(run_program, config.copy())
         else:
             ui.notify("Select a method.")

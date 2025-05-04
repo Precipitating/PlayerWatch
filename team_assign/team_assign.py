@@ -10,7 +10,6 @@ class TeamAssign:
         self.frame_gen = input_frame_gen
         self.model = input_model
     def extract_crops(self, read_from_stub=False, stub_path=None):
-
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
             with open(stub_path, 'rb') as f:
                 extracted_crop = pickle.load(f)
@@ -30,6 +29,7 @@ class TeamAssign:
 
 
         if stub_path is not None:
+            os.makedirs(os.path.dirname(stub_path), exist_ok=True)
             with open(stub_path, 'wb') as f:
                 pickle.dump(crops, f)
 
