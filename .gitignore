@@ -180,3 +180,4 @@ models/
 yolov8x.pt
 stubs/
 dev_and_analysis/
+sam2_b.pt

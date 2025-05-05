@@ -35,7 +35,9 @@ config = {
     'whisper_processes': 4,
     'audio_start_time_offset': -2,
     'audio_crop_duration': 5,
-    'audio_word_similarity': 70
+    'audio_word_similarity': 70,
+
+    'sam_2_mode': False
 }
 
 async def choose_file(button, input_video = False,ball_model = False, player_model = False):
@@ -109,7 +111,7 @@ def run_program(config):
     w, h = video_info.width, video_info.height
 
     # Initialize Tracker and TeamAssign
-    tracker = Tracker(config['player_model_path'], config['ball_model_path'], w=w, h=h)
+    tracker = Tracker(config['player_model_path'], config['ball_model_path'], w=w, h=h,config= config)
     frame_gen = read_video(config['input_video_path'], config['crop_frame_skip'])
     team_assigner = TeamAssign(frame_gen, tracker.model)
 
@@ -125,7 +127,8 @@ def run_program(config):
         team_classifier=team_classifier,
         batch_size=config['batch_size'],
         read_from_stub=True,
-        stub_path='stubs/annotation_stub.pk1'
+        stub_path='stubs/annotation_stub.pk1',
+        input_path=config['input_video_path']
     )
 
     # Handle ball tracking

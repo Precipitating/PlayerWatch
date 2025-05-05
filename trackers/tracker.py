@@ -1,5 +1,6 @@
 import copy
-from ultralytics import YOLO
+from ultralytics import YOLO, SAM
+from ultralytics.models.sam import SAM2VideoPredictor
 import supervision as sv
 import pickle
 import os
@@ -8,6 +9,7 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import player_ball_assign
+from nicegui import ui
 from sports.common.ball import BallTracker, BallAnnotator
 
 sys.path.append('../')
@@ -64,6 +66,8 @@ class BallHandler:
                 self.incomplete_ball_positions[i] = new_det
 
 
+
+
     def handle_ball_tracking(self, read_from_stub = True, stub_path = None):
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
             with open(stub_path, 'rb') as f:
@@ -115,11 +119,14 @@ class BallHandler:
 
 
 class Tracker:
-    def __init__(self, model_path, ball_model_path, w,h):
+    def __init__(self, model_path, ball_model_path, w,h, config):
         self.model = YOLO(model_path)
+        self.sam_model = SAM("models/sam/sam2_b.pt")
+        self.sam_prompt = 0
+        self.sam_prompt_set =False
         self.ball_model = YOLO(ball_model_path)
-        print(self.ball_model.names)
         self.tracker = sv.ByteTrack()
+        self.config = config
 
         self.ball_tracker = BallTracker(buffer_size=20)
         self.w, self.h = w,h
@@ -180,7 +187,6 @@ class Tracker:
 
 
     def get_player_in_possession(self, ball_bbox, players, assigner):
-
         assigned_player = assigner.assign_ball_to_player(players=players, ball_bbox= ball_bbox)
         if assigned_player != -1:
             return assigned_player
@@ -214,6 +220,37 @@ class Tracker:
             ball_detections = self.ball_tracker.update(ball_detections)
             ball_positions.append(ball_detections[0])
 
+    def get_sam_detections(self, input_path, frame, ball_positions):
+        slicer = sv.InferenceSlicer(
+            callback=self.callback,
+            overlap_filter=sv.OverlapFilter.NON_MAX_SUPPRESSION,
+            slice_wh=(self.w // 2 + 100, self.h // 2 + 100),
+            overlap_ratio_wh=None,
+            overlap_wh=(100, 100),
+            iou_threshold=0.1
+        )
+
+        ball_detections = slicer(frame)
+        if len(ball_detections) != 0:
+            self.sam_prompt = ball_detections[0]
+            overrides = dict(conf=0.5, task="segment", mode="predict", imgsz=1024, model="sam2_b.pt")
+            predictor = SAM2VideoPredictor(overrides=overrides)
+            results= predictor(source= input_path, stream=True, bboxes= self.sam_prompt.xyxy)
+            for result in results:
+                if len(result.boxes.xyxy) != 0:
+                    ball_positions.append(result.boxes)
+                else:
+                    new_row = np.full((1, 4), np.nan)
+                    filler_detection = sv.Detections.empty()
+                    filler_detection.xyxy = np.vstack([filler_detection.xyxy, new_row])
+
+                    filler_detection.class_id = np.append(filler_detection.class_id, 0)
+                    filler_detection.confidence = np.append(filler_detection.confidence,
+                                                            50.0)  # filler value, doesn't matter as its getting predicted
+                    ball_positions.append(filler_detection)
+            self.sam_prompt_set = True
+
+
 
 
     def callback(self, patch: np.ndarray) -> sv.Detections:
@@ -223,7 +260,9 @@ class Tracker:
 
 
 
-    def initialize_and_annotate(self, frame_gen, batch_size, team_classifier, read_from_stub=False, stub_path=None):
+
+
+    def initialize_and_annotate(self, input_path, frame_gen, batch_size, team_classifier, read_from_stub=False, stub_path=None):
 
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
             with open(stub_path, 'rb') as f:
@@ -236,11 +275,20 @@ class Tracker:
         ball_positions = []
         player_positions = []
 
+
         for frame in tqdm(frame_gen, desc="Processing Frames"):
             frame_batch.append(frame)
 
             # since slicing can only handle one frame at a time, we'll do ball detection per frame
-            self.get_ball_detections(frame, ball_positions)
+            if not self.config['sam_2_mode']:
+                self.get_ball_detections(frame, ball_positions)
+            elif not self.sam_prompt_set:
+                self.get_sam_detections(input_path, frame, ball_positions)
+                if not self.sam_prompt_set:
+                    ui.notify('First frame ball not found')
+                    return None
+
+
 
             if len(frame_batch) >= batch_size:
                 # if batch size reached process it
