@@ -15,7 +15,6 @@ from contextlib import contextmanager
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 config = {
-    'prev_input_video_path': '',
     'input_video_path': '',
     'output_video_path': '',
     'annotated_video_path': '',
@@ -78,24 +77,6 @@ async def choose_output_folder(button):
         button.classes('bg-green', remove='bg-red')
 
 
-def delete_stubs():
-    # delete stubs if new video
-    if config['prev_input_video_path'] != config['input_video_path']:
-        path = os.path.join(os.getcwd(), 'stubs')
-        if os.path.isdir(path):
-            for filename in os.listdir(path):
-                file_path = os.path.join(path, filename)
-                if os.path.isfile(file_path) and filename.lower().endswith('.pk1'):
-                    os.remove(file_path)
-                    print("Deleted existing stubs for new video file")
-                    ui.notify('Deleted old stubs for new video')
-
-
-    config['prev_input_video_path'] = config['input_video_path']
-
-
-
-
 def run_program(config):
     # AI detection method via ball tracking
     if not all(config.get(key) not in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path', 'ball_model_path']):
@@ -126,7 +107,7 @@ def run_program(config):
         frame_gen=frame_gen,
         team_classifier=None,
         batch_size=config['batch_size'],
-        read_from_stub=True,
+        read_from_stub=False,
         stub_path='stubs/annotation_stub.pk1',
         input_path=config['input_video_path']
     )
@@ -140,7 +121,7 @@ def run_program(config):
     )
 
     ball_annotated_frames, player_in_possession_buffer = ball_handler.handle_ball_tracking(
-        read_from_stub=True,
+        read_from_stub=False,
         stub_path='stubs/ball_stub.pk1'
     )
 
@@ -190,7 +171,6 @@ async def run_main_async(button, spinner):
         if config['audio_crop']:
             await run_audio_crop_program(config.copy())
         elif config['ball_track_crop']:
-            delete_stubs()
             await run.cpu_bound(run_program, config.copy())
         else:
             ui.notify("Select a method.")
