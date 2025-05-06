@@ -11,9 +11,14 @@ from tqdm import tqdm
 import player_ball_assign
 from nicegui import ui
 from sports.common.ball import BallTracker, BallAnnotator
+from transformers import AutoModelForCausalLM, AutoProcessor
+from ultralytics.utils.plotting import Annotator, colors
+from PIL import Image
+import torch
 
 sys.path.append('../')
-
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+TORCH_DTYPE = torch.float16 if torch.cuda.is_available() else torch.float32
 BALL_ID = 0
 GOALKEEPER_ID = 1
 PLAYER_ID = 2
@@ -127,6 +132,9 @@ class Tracker:
         self.ball_model = YOLO(ball_model_path)
         self.tracker = sv.ByteTrack()
         self.config = config
+        self.florence_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base", torch_dtype=TORCH_DTYPE,trust_remote_code=True).to(DEVICE)
+        self.processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
+
 
         self.ball_tracker = BallTracker(buffer_size=20)
         self.w, self.h = w,h
@@ -220,34 +228,95 @@ class Tracker:
             ball_detections = self.ball_tracker.update(ball_detections)
             ball_positions.append(ball_detections[0])
 
-    def get_sam_detections(self, input_path, frame, ball_positions):
-        slicer = sv.InferenceSlicer(
-            callback=self.callback,
-            overlap_filter=sv.OverlapFilter.NON_MAX_SUPPRESSION,
-            slice_wh=(self.w // 2 + 100, self.h // 2 + 100),
-            overlap_ratio_wh=None,
-            overlap_wh=(100, 100),
-            iou_threshold=0.1
+    def florence_inference(self, image, task_prompt, text_input=None):
+        """
+        Performs inference using the given image and task prompt.
+
+        Args:
+            image (PIL.Image or tensor): The input image for processing.
+            task_prompt (str): The prompt specifying the task for the model.
+            text_input (str, optional): Additional text input to refine the prompt.
+
+        Returns:
+            dict: The model's processed response after inference.
+        """
+        # Combine task prompt with additional text input if provided
+        prompt = task_prompt if text_input is None else task_prompt + text_input
+
+        # Generate input data for model processing from the given prompt and image
+        inputs = self.processor(
+            text=prompt,  # Text input for the model
+            images=image,  # Image input for the model
+            return_tensors="pt",  # Return PyTorch tensors
+        ).to("cuda", torch.float16)  # Move inputs to GPU with float16 precision
+
+        # Generate model predictions (token IDs)
+        generated_ids = self.florence_model.generate(
+            input_ids=inputs["input_ids"].cuda(),  # text input IDs to CUDA
+            pixel_values=inputs["pixel_values"].cuda(),  # pixel values to CUDA
+            max_new_tokens=1024,  # Set maximum number of tokens to generate
+            early_stopping=False,  # Disable early stopping
+            do_sample=False,  # Use deterministic inference
+            num_beams=3,  # Set beam search width for better predictions
         )
 
-        ball_detections = slicer(frame)
-        if len(ball_detections) != 0:
-            self.sam_prompt = ball_detections[0]
-            overrides = dict(conf=0.5, task="segment", mode="predict", imgsz=1024, model="sam2_b.pt")
+        # Decode generated token IDs into text
+        generated_text = self.processor.batch_decode(
+            generated_ids,  # Generated token IDs
+            skip_special_tokens=False,  # Retain special tokens in output
+        )[0]  # Extract first result from batch
+
+        # Post-process the generated text into a structured response
+        parsed_answer = self.processor.post_process_generation(
+            generated_text,  # Raw generated text
+            task=task_prompt,  # Task type for post-processing
+            image_size=(image.width, image.height),  # scaling output
+        )
+
+        return parsed_answer  # Return the final processed output
+
+
+    def detect_ball_via_florence(self, frame):
+        task_prompt = '<OPEN_VOCABULARY_DETECTION>'
+        results = self.florence_inference(frame,task_prompt, text_input='ball')["<OPEN_VOCABULARY_DETECTION>"]
+
+        if results['bboxes']:
+            return results['bboxes'][0]
+        else:
+            return None
+
+
+
+
+    def get_sam_detections(self, input_path, frame, ball_positions):
+
+        # create filler sv.Detections
+        new_row = np.full((1, 4), np.nan)
+        filler_detection = sv.Detections.empty()
+        filler_detection.xyxy = np.array([np.nan, np.nan, np.nan, np.nan])
+
+        filler_detection.class_id = np.append(filler_detection.class_id, 0)
+        filler_detection.confidence = np.append(filler_detection.confidence,
+                                                50.0)  # filler value, doesn't matter as its getting predicted
+
+
+        # attempt to get the ball bbox via florence (first frame)
+        ball_bbox = self.detect_ball_via_florence(Image.fromarray(frame))
+        if ball_bbox:
+            self.sam_prompt = ball_bbox
+            overrides = dict(conf=0.3, task="segment", mode="predict", imgsz=1024, model="sam2_b.pt")
             predictor = SAM2VideoPredictor(overrides=overrides)
-            results= predictor(source= input_path, stream=True, bboxes= self.sam_prompt.xyxy)
+            results= predictor(source= input_path, stream=True, bboxes= self.sam_prompt)
             for result in results:
                 if len(result.boxes.xyxy) != 0:
-                    ball_positions.append(result.boxes)
+                    print(result.boxes.xyxy.cpu().numpy())
+                    filler_detection.xyxy = result.boxes.xyxy.cpu().numpy()
+                    ball_positions.append(copy.deepcopy(filler_detection))
                 else:
-                    new_row = np.full((1, 4), np.nan)
-                    filler_detection = sv.Detections.empty()
-                    filler_detection.xyxy = np.vstack([filler_detection.xyxy, new_row])
+                    print("Fake frame needed for SAM")
+                    filler_detection.xyxy = np.array([np.nan, np.nan, np.nan, np.nan])
+                    ball_positions.append(copy.deepcopy(filler_detection))
 
-                    filler_detection.class_id = np.append(filler_detection.class_id, 0)
-                    filler_detection.confidence = np.append(filler_detection.confidence,
-                                                            50.0)  # filler value, doesn't matter as its getting predicted
-                    ball_positions.append(filler_detection)
             self.sam_prompt_set = True
 
 
@@ -346,8 +415,8 @@ class Tracker:
         goalkeepers_detections = all_detections[all_detections.class_id == GOALKEEPER_ID]
         referees_detections = all_detections[all_detections.class_id == REFEREE_ID]
 
-        players_crops = [sv.crop_image(frame_in_batch, xyxy) for xyxy in players_detections.xyxy]
-        players_detections.class_id = team_classifier.predict(players_crops)
+        #players_crops = [sv.crop_image(frame_in_batch, xyxy) for xyxy in players_detections.xyxy]
+       # players_detections.class_id = team_classifier.predict(players_crops)
 
         goalkeepers_detections.class_id = self.resolve_goalkeepers_team_id(players_detections, goalkeepers_detections)
 

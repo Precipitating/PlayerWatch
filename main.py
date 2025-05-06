@@ -113,18 +113,18 @@ def run_program(config):
     # Initialize Tracker and TeamAssign
     tracker = Tracker(config['player_model_path'], config['ball_model_path'], w=w, h=h,config= config)
     frame_gen = read_video(config['input_video_path'], config['crop_frame_skip'])
-    team_assigner = TeamAssign(frame_gen, tracker.model)
-
-    # Extract crops and fit team classifier
-    crops = team_assigner.extract_crops(read_from_stub=True, stub_path='stubs/crop_stub.pk1')
-    team_classifier = TeamClassifier(device=DEVICE)
-    team_classifier.fit(crops)
+    # team_assigner = TeamAssign(frame_gen, tracker.model)
+    #
+    # # Extract crops and fit team classifier
+    # crops = team_assigner.extract_crops(read_from_stub=True, stub_path='stubs/crop_stub.pk1')
+    # team_classifier = TeamClassifier(device=DEVICE)
+    # team_classifier.fit(crops)
 
     # Annotate ball and player positions
     frame_gen = read_video(config['input_video_path'])
     annotated_frames, ball_positions, player_positions = tracker.initialize_and_annotate(
         frame_gen=frame_gen,
-        team_classifier=team_classifier,
+        team_classifier=None,
         batch_size=config['batch_size'],
         read_from_stub=True,
         stub_path='stubs/annotation_stub.pk1',
@@ -344,6 +344,10 @@ def main():
                       suffix='fr',
                       on_change=lambda e: (config.update({'ball_frame_forgiveness': int(e.value)}),
                                            print(f"Ball frame forgiveness set to: {e.value}")))
+        with ui.row().classes('w-full justify-center').bind_visibility_from(ai_ball_detection, 'value'):
+            sam_2_mode = ui.checkbox('SAM-2 Ball Track',
+                                        on_change=lambda e: config.update({'sam_2_mode': e.value}))
+
         ui.separator()
         with ui.row().classes('w-full justify-center'):
             run_button = ui.button('Run', on_click=lambda e: run_main_async(run_button, processing_spinner))
