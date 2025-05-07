@@ -31,7 +31,7 @@ config = {
     'ball_track_crop': False,
     'audio_crop_player_name': '',
     'whisper_model': 'small',
-    'whisper_processes': 4,
+    'whisper_batch_size': 4,
     'audio_start_time_offset': -2,
     'audio_crop_duration': 5,
     'audio_word_similarity': 70,
@@ -150,7 +150,8 @@ async def run_audio_crop_program(config):
         audio_crop = AudioCrop(target_name=config['audio_crop_player_name'],
                                input_file=config['input_video_path'],
                                output_dir=config['output_video_path'],
-                               processors=config['whisper_processes'])
+                               batch_size=config['whisper_batch_size'],
+                               model_size=config['whisper_model'])
         try:
             await run.cpu_bound(audio_crop.start_transcription,
                                 config['audio_start_time_offset'],
@@ -234,15 +235,16 @@ def main():
                 ui.item('tiny', on_click=lambda: config.update({'whisper_model': 'tiny'}))
                 ui.item('small', on_click=lambda e: config.update({'whisper_model': 'small'}))
                 ui.item('medium', on_click=lambda e: config.update({'whisper_model': 'medium'}))
-                ui.item('large-v3-turbo', on_click=lambda e: config.update({'whisper_model': 'large-v3-turbo'}))
+                ui.item('base', on_click=lambda e: config.update({'whisper_model': 'base'}))
+                ui.item('large-v3', on_click=lambda e: config.update({'whisper_model': 'large-v3'}))
 
         with ui.grid(columns=2).classes('items-center').bind_visibility_from(ai_audio_crop, 'value'):
-            ui.number(label="Processes",
-                      value=config['whisper_processes'],
+            ui.number(label="Batch Size",
+                      value=config['whisper_batch_size'],
                       step=1,
                       precision=0,
-                      on_change=lambda e: (config.update({'whisper_processes': int(e.value)}),
-                                           print(f"Processes set to: {e.value}")))
+                      on_change=lambda e: (config.update({'whisper_batch_size': int(e.value)}),
+                                           print(f"Batch size set to: {e.value}")))
 
             ui.number(label="Start time offset",
                       value=config['audio_start_time_offset'],
