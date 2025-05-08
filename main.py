@@ -1,8 +1,6 @@
-from trackers.tracker import BallHandler
+from trackers.tracker import BallHandler, load_pickle_to_list
 from utils import read_video, save_video
 from trackers import Tracker
-from team_assign import TeamAssign
-from sports.common.team import TeamClassifier
 from split_videos import VideoSplitter
 import supervision as sv
 import torch
@@ -11,6 +9,7 @@ import webview
 import os
 from audio_crop import AudioCrop
 from contextlib import contextmanager
+import glob
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -78,6 +77,15 @@ async def choose_output_folder(button):
 
 
 def run_program(config):
+    # delete previous stubs if applicable
+    stub_path = os.path.join(os.getcwd(), 'stubs')
+    if os.path.isdir(stub_path):
+        pkl_files = glob.glob(os.path.join(stub_path, '*.pkl'))
+        for file in pkl_files:
+            os.remove(file)
+            print(f"Deleted: {file}")
+
+
     # AI detection method via ball tracking
     if not all(config.get(key) not in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path', 'ball_model_path']):
         ui.notify('ERROR: Not all inputs set')
@@ -91,21 +99,14 @@ def run_program(config):
     video_info = sv.VideoInfo.from_video_path(config['input_video_path'])
     w, h = video_info.width, video_info.height
 
-    # Initialize Tracker and TeamAssign
+    # Initialize Tracker
     tracker = Tracker(config['player_model_path'], config['ball_model_path'], w=w, h=h,config= config)
-    frame_gen = read_video(config['input_video_path'], config['crop_frame_skip'])
-    # team_assigner = TeamAssign(frame_gen, tracker.model)
-    #
-    # # Extract crops and fit team classifier
-    # crops = team_assigner.extract_crops(read_from_stub=True, stub_path='stubs/crop_stub.pk1')
-    # team_classifier = TeamClassifier(device=DEVICE)
-    # team_classifier.fit(crops)
+    read_video(config['input_video_path'], config['crop_frame_skip'])
 
     # Annotate ball and player positions
     frame_gen = read_video(config['input_video_path'])
-    annotated_frames, ball_positions, player_positions = tracker.initialize_and_annotate(
+    tracker.initialize_and_annotate(
         frame_gen=frame_gen,
-        team_classifier=None,
         batch_size=config['batch_size'],
         read_from_stub=False,
         stub_path='stubs/annotation_stub.pk1',
@@ -114,13 +115,10 @@ def run_program(config):
 
     # Handle ball tracking
     ball_handler = BallHandler(
-        incomplete_ball_positions=ball_positions,
-        annotated_frames=annotated_frames,
-        player_positions=player_positions,
         ball_dist=config['player_to_ball_dist']
     )
 
-    ball_annotated_frames, player_in_possession_buffer = ball_handler.handle_ball_tracking(
+    ball_handler.handle_ball_tracking(
         read_from_stub=False,
         stub_path='stubs/ball_stub.pk1'
     )
@@ -128,7 +126,6 @@ def run_program(config):
     # Split the video based on possession tracking
     frame_gen = read_video(config['input_video_path'])
     video_splitter = VideoSplitter(
-        tracker_array=player_in_possession_buffer,
         frame_gen=frame_gen,
         source_path=config['input_video_path'],
         grace_period=config['grace_period'],
@@ -138,8 +135,10 @@ def run_program(config):
     )
     video_splitter.crop_videos()
 
-    # Save the final annotated video
-    save_video(config['input_video_path'], config['annotated_video_path'], ball_annotated_frames)
+    # Save the final annotated video (not required in release)
+    final_frames = []
+    load_pickle_to_list('stubs/final_frame_result.pkl', container= final_frames)
+    save_video(config['input_video_path'], config['annotated_video_path'], final_frames)
 
     # Mark the process as finished
     print("Done")
@@ -172,7 +171,11 @@ async def run_main_async(button, spinner):
         if config['audio_crop']:
             await run_audio_crop_program(config.copy())
         elif config['ball_track_crop']:
-            await run.cpu_bound(run_program, config.copy())
+            try:
+                await run.cpu_bound(run_program, config.copy())
+            except Exception as e:
+                print('Error:', e)
+                ui.notify(f'Error: {e}')
         else:
             ui.notify("Select a method.")
 

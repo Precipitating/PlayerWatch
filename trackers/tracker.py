@@ -12,7 +12,6 @@ import player_ball_assign
 from nicegui import ui
 from sports.common.ball import BallTracker, BallAnnotator
 from transformers import AutoModelForCausalLM, AutoProcessor
-from ultralytics.utils.plotting import Annotator, colors
 from PIL import Image
 import torch
 
@@ -24,13 +23,31 @@ GOALKEEPER_ID = 1
 PLAYER_ID = 2
 REFEREE_ID = 3
 
+
+
+def store_as_pickle(path, data):
+    with open(path, 'ab') as f:
+        pickle.dump(data, f)
+        f.flush()
+
+def load_pickle_to_list(path, container):
+    with open(path, "rb") as f:
+        while True:
+            try:
+                container.append(pickle.load(f))
+            except EOFError:
+                break
+
 class BallHandler:
-    def __init__(self, incomplete_ball_positions, annotated_frames, player_positions, ball_dist):
-        self.incomplete_ball_positions = incomplete_ball_positions
+    def __init__(self, ball_dist):
+        self.incomplete_ball_positions = []
+        self.annotated_frames = []
+        self.player_positions = []
+        self.load_data()
+
+
         self.complete_ball_positions = []
-        self.annotated_frames = annotated_frames
         self.player_assigner = player_ball_assign.PlayerBallAssign(ball_dist)
-        self.player_positions = player_positions
         self.ball_annotator = BallAnnotator(radius=7, buffer_size=10)
 
         self.triangle_annotator = sv.TriangleAnnotator(
@@ -48,6 +65,13 @@ class BallHandler:
         )
 
 
+
+
+    def load_data(self):
+        files = ['stubs/ball_positions.pkl', 'stubs/player_positions.pkl', 'stubs/annotated_result.pkl']
+        load_pickle_to_list(path= files[0], container=self.incomplete_ball_positions)
+        load_pickle_to_list(path= files[1], container=self.player_positions)
+        load_pickle_to_list(path= files[2], container=self.annotated_frames)
 
 
     # interpolate and fill missing positions
@@ -73,28 +97,19 @@ class BallHandler:
 
 
 
-    def handle_ball_tracking(self, read_from_stub = True, stub_path = None):
-        if read_from_stub and stub_path is not None and os.path.exists(stub_path):
-            with open(stub_path, 'rb') as f:
-                final_frame_result, player_in_possession_buffer = pickle.load(f)
-                print("found ball tracking stub")
-                return final_frame_result, player_in_possession_buffer
-
+    def handle_ball_tracking(self, read_from_stub = False, stub_path = None):
         self.fill_missing_positions()
 
-        final_frame_result = []
-        player_in_possession_buffer = []
         for frame_num, frame in enumerate(tqdm(self.annotated_frames, desc="Processing Ball Tracking Frames")):
             # track player in possession of ball if within distance
-            player_in_possession = None
 
             player_in_possession = self.player_assigner.assign_ball_to_player(ball_bbox=self.incomplete_ball_positions[frame_num].xyxy[0],
                                                                               players=self.player_positions[frame_num])
             if player_in_possession != -1:
                 player_in_possession = self.player_positions[frame_num][self.player_positions[frame_num].tracker_id == player_in_possession]
-                player_in_possession_buffer.append(player_in_possession.tracker_id)
+                store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=player_in_possession.tracker_id)
             else:
-                player_in_possession_buffer.append(None)
+                store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=None)
 
             # go thru annotated frames and annotate the ball
             frame = self.ball_annotator.annotate(frame, self.incomplete_ball_positions[frame_num])
@@ -103,23 +118,7 @@ class BallHandler:
             if isinstance(player_in_possession, sv.Detections):
                 frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
 
-
-            final_frame_result.append(frame)
-
-
-
-
-        if stub_path is not None:
-            os.makedirs(os.path.dirname(stub_path), exist_ok=True)
-            with open(stub_path, 'wb') as f:
-                pickle.dump((final_frame_result, player_in_possession_buffer), f)
-
-
-        return final_frame_result, player_in_possession_buffer
-
-
-
-
+            store_as_pickle(path='stubs/final_frame_result.pkl', data= frame)
 
 
 
@@ -176,24 +175,6 @@ class Tracker:
 
 
 
-
-
-
-
-    def resolve_goalkeepers_team_id(self, players: sv.Detections, goalkeepers: sv.Detections) -> np.ndarray:
-        goalkeepers_xy = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-        players_xy = players.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-        team_0_centroid = players_xy[players.class_id == 0].mean(axis=0)
-        team_1_centroid = players_xy[players.class_id == 1].mean(axis=0)
-        goalkeepers_team_id = []
-        for goalkeeper_xy in goalkeepers_xy:
-            dist_0 = np.linalg.norm(goalkeeper_xy - team_0_centroid)
-            dist_1 = np.linalg.norm(goalkeeper_xy - team_1_centroid)
-            goalkeepers_team_id.append(0 if dist_0 < dist_1 else 1)
-
-        return np.array(goalkeepers_team_id)
-
-
     def get_player_in_possession(self, ball_bbox, players, assigner):
         assigned_player = assigner.assign_ball_to_player(players=players, ball_bbox= ball_bbox)
         if assigned_player != -1:
@@ -202,7 +183,7 @@ class Tracker:
             return -1
 
 
-    def get_ball_detections(self, frame, ball_positions):
+    def get_ball_detections(self, frame):
         # ball
         slicer = sv.InferenceSlicer(
             callback=self.callback,
@@ -214,6 +195,8 @@ class Tracker:
         )
         ball_detections = slicer(frame)
 
+        os.makedirs('stubs', exist_ok=True)
+
         if len(ball_detections) == 0:
             new_row = np.full((1, 4), np.nan)
 
@@ -223,10 +206,10 @@ class Tracker:
             filler_detection.class_id = np.append(filler_detection.class_id, 0)
             filler_detection.confidence = np.append(filler_detection.confidence, 50.0)# filler value, doesn't matter as its getting predicted
 
-            ball_positions.append(filler_detection)
+            store_as_pickle(path= 'stubs/ball_positions.pkl', data= filler_detection)
         else:
             ball_detections = self.ball_tracker.update(ball_detections)
-            ball_positions.append(ball_detections[0])
+            store_as_pickle(path='stubs/ball_positions.pkl', data=ball_detections[0])
 
     def florence_inference(self, image, task_prompt, text_input=None):
         """
@@ -288,10 +271,9 @@ class Tracker:
 
 
 
-    def get_sam_detections(self, input_path, frame, ball_positions):
+    def get_sam_detections(self, input_path, frame):
 
         # create filler sv.Detections
-        new_row = np.full((1, 4), np.nan)
         filler_detection = sv.Detections.empty()
         filler_detection.xyxy = np.array([np.nan, np.nan, np.nan, np.nan])
 
@@ -307,15 +289,18 @@ class Tracker:
             overrides = dict(conf=0.3, task="segment", mode="predict", imgsz=1024, model="sam2_b.pt")
             predictor = SAM2VideoPredictor(overrides=overrides)
             results= predictor(source= input_path, stream=True, bboxes= self.sam_prompt)
+            os.makedirs('stubs', exist_ok=True)
             for result in results:
                 if len(result.boxes.xyxy) != 0:
                     print(result.boxes.xyxy.cpu().numpy())
                     filler_detection.xyxy = result.boxes.xyxy.cpu().numpy()
-                    ball_positions.append(copy.deepcopy(filler_detection))
+                    store_as_pickle(path='stubs/ball_positions.pkl', data=filler_detection)
+
                 else:
                     print("Fake frame needed for SAM")
                     filler_detection.xyxy = np.array([np.nan, np.nan, np.nan, np.nan])
-                    ball_positions.append(copy.deepcopy(filler_detection))
+                    store_as_pickle(path='stubs/ball_positions.pkl', data=filler_detection)
+
 
             self.sam_prompt_set = True
 
@@ -331,7 +316,7 @@ class Tracker:
 
 
 
-    def initialize_and_annotate(self, input_path, frame_gen, batch_size, team_classifier, read_from_stub=False, stub_path=None):
+    def initialize_and_annotate(self, input_path, frame_gen, batch_size, read_from_stub=False, stub_path=None):
 
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
             with open(stub_path, 'rb') as f:
@@ -340,22 +325,18 @@ class Tracker:
                 return processed_frames
 
         frame_batch = []
-        annotated_result = []
-        ball_positions = []
-        player_positions = []
-
 
         for frame in tqdm(frame_gen, desc="Processing Frames"):
             frame_batch.append(frame)
 
             # since slicing can only handle one frame at a time, we'll do ball detection per frame
             if not self.config['sam_2_mode']:
-                self.get_ball_detections(frame, ball_positions)
+                self.get_ball_detections(frame)
             elif not self.sam_prompt_set:
-                self.get_sam_detections(input_path, frame, ball_positions)
+                self.get_sam_detections(input_path, frame)
                 if not self.sam_prompt_set:
                     ui.notify('First frame ball not found')
-                    return None
+                    return False
 
 
 
@@ -366,13 +347,9 @@ class Tracker:
                 # process each frame in batch
                 for frame_in_batch, detections in zip(frame_batch, detections_batch):
                     self.process_frame_batch(detections= detections,
-                                             frame_in_batch= frame_in_batch,
-                                             team_classifier= team_classifier,
-                                             annotated_result= annotated_result,
-                                             player_positions= player_positions
-                                             )
+                                             frame_in_batch= frame_in_batch)
                 # Reset the batch
-                frame_batch = []
+                frame_batch.clear()
 
             # handle rest of frames
         if len(frame_batch) > 0:
@@ -381,48 +358,29 @@ class Tracker:
             # process each frame in batch
             for frame_in_batch, detections in zip(frame_batch, detections_batch):
                 self.process_frame_batch(detections=detections,
-                                         frame_in_batch=frame_in_batch,
-                                         team_classifier=team_classifier,
-                                         annotated_result=annotated_result,
-                                         player_positions=player_positions
-                                         )
+                                         frame_in_batch=frame_in_batch)
 
-            frame_batch = []
-
-
-
-        if stub_path is not None:
-            os.makedirs(os.path.dirname(stub_path), exist_ok=True)
-            with open(stub_path, 'wb') as f:
-                pickle.dump((annotated_result, ball_positions, player_positions), f)
-
-        return annotated_result, ball_positions, player_positions
+        return True
 
 
 
 
-    def process_frame_batch(self, detections, frame_in_batch, team_classifier, annotated_result, player_positions):
+
+
+    def process_frame_batch(self, detections, frame_in_batch):
 
         detections = sv.Detections.from_ultralytics(detections)
 
+        # all detection data including ball, ref and players
         all_detections = detections[detections.class_id != BALL_ID]
         all_detections = all_detections.with_nms(threshold=0.5, class_agnostic=True)
         all_detections = self.tracker.update_with_detections(all_detections)
 
         players_detections = all_detections[all_detections.class_id == PLAYER_ID]
-        player_positions.append(copy.deepcopy(players_detections))
 
-        goalkeepers_detections = all_detections[all_detections.class_id == GOALKEEPER_ID]
-        referees_detections = all_detections[all_detections.class_id == REFEREE_ID]
-
-        #players_crops = [sv.crop_image(frame_in_batch, xyxy) for xyxy in players_detections.xyxy]
-       # players_detections.class_id = team_classifier.predict(players_crops)
-
-        goalkeepers_detections.class_id = self.resolve_goalkeepers_team_id(players_detections, goalkeepers_detections)
-
-        referees_detections.class_id -= 1
-
-        all_detections = sv.Detections.merge([players_detections, goalkeepers_detections, referees_detections])
+        # store to disk to reduce memory
+        os.makedirs('stubs', exist_ok=True)
+        store_as_pickle(path='stubs/player_positions.pkl', data=players_detections)
 
         labels = [
             f"#{tracker_id}"
@@ -437,11 +395,7 @@ class Tracker:
         annotated_frame = self.label_annotator.annotate(annotated_frame, all_detections, labels)
 
         # Append annotated frame to results
-        annotated_result.append(annotated_frame)
-
-
-
-
+        store_as_pickle(path='stubs/annotated_result.pkl', data=annotated_frame)
 
 
 

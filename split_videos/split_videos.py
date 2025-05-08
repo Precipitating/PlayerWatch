@@ -1,11 +1,12 @@
 from tqdm import tqdm
 import os
+from trackers.tracker import load_pickle_to_list
 from utils import save_video
 
-
 class VideoSplitter:
-    def __init__(self, tracker_array, frame_gen, source_path, grace_period, frames_considered_possession, output_folder, ball_frame_forgiveness):
-        self.tracker_array = tracker_array
+    def __init__(self, frame_gen, source_path, grace_period, frames_considered_possession, output_folder, ball_frame_forgiveness):
+        self.tracker_array = []
+        load_pickle_to_list(path= 'stubs/player_in_possession_buffer.pkl', container= self.tracker_array)
         self.frame_gen = frame_gen
         self.source_path = source_path
         self.possessor_grace_period = grace_period
