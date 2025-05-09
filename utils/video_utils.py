@@ -1,13 +1,11 @@
 import cv2
 import supervision as sv
-from tqdm import tqdm
+import pickle
 
 def read_video(path, stride = 1):
 
     frame_gen = sv.get_video_frames_generator(path, stride)
     return frame_gen
-
-
 
 
 def save_video(source_path, target_path, frames):
@@ -23,6 +21,16 @@ def save_video(source_path, target_path, frames):
         out.write(frame)
 
     out.release()
+
+def load_pickle_as_generator(path):
+    with open(path, 'rb') as f:
+        while True:
+            try:
+                # Yield each object as it is loaded from the pickle file
+                yield pickle.load(f)
+            except EOFError:
+                # End of file reached, stop the generator
+                break
 
 
 

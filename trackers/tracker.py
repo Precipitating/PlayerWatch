@@ -24,11 +24,18 @@ PLAYER_ID = 2
 REFEREE_ID = 3
 
 
-
 def store_as_pickle(path, data):
     with open(path, 'ab') as f:
         pickle.dump(data, f)
         f.flush()
+
+def store_as_pickle_individually(path, data):
+    with open(path, 'ab') as f:
+        for d in data:
+            pickle.dump(d, f)
+        f.flush()
+
+
 
 def load_pickle_to_list(path, container):
     with open(path, "rb") as f:
@@ -40,12 +47,6 @@ def load_pickle_to_list(path, container):
 
 class BallHandler:
     def __init__(self, ball_dist):
-        self.incomplete_ball_positions = []
-        self.annotated_frames = []
-        self.player_positions = []
-        self.load_data()
-
-
         self.complete_ball_positions = []
         self.player_assigner = player_ball_assign.PlayerBallAssign(ball_dist)
         self.ball_annotator = BallAnnotator(radius=7, buffer_size=10)
@@ -68,57 +69,87 @@ class BallHandler:
 
 
     def load_data(self):
-        files = ['stubs/ball_positions.pkl', 'stubs/player_positions.pkl', 'stubs/annotated_result.pkl']
-        load_pickle_to_list(path= files[0], container=self.incomplete_ball_positions)
-        load_pickle_to_list(path= files[1], container=self.player_positions)
-        load_pickle_to_list(path= files[2], container=self.annotated_frames)
+        files = ['stubs/player_positions.pkl', 'stubs/annotated_result.pkl']
+        #load_pickle_to_list(path= files[0], container=self.player_positions)
+        #load_pickle_to_list(path= files[1], container=self.annotated_frames)
 
 
     # interpolate and fill missing positions
-    def fill_missing_positions(self):
-        converted_positions = [x.xyxy[0] for x in self.incomplete_ball_positions]
-        df_ball_positions = pd.DataFrame(converted_positions, columns=['x1', 'y1', 'x2', 'y2'])
-        df_ball_positions = df_ball_positions.interpolate()
-        df_ball_positions = df_ball_positions.bfill()
-        df_ball_positions = df_ball_positions.to_numpy()
+    def fill_missing_positions(self, batch_size = 50):
+        # batch load for memory efficiency
+        with open('stubs/ball_positions.pkl', "rb") as f:
+            while True:
+                batch = []
+                # unpickle a batch into a list
+                for _ in range(batch_size):
+                    try:
+                        item = pickle.load(f)
+                        batch.append(item)
+                    except EOFError:
+                        print("Missing positions ball positions end of file reached")
+                        break
 
+                if not batch:
+                    break
 
-        for i in range(len(self.incomplete_ball_positions)):
-            if np.isnan(self.incomplete_ball_positions[i].xyxy[0]).any():
-                det = self.incomplete_ball_positions[i]
-                new_det = sv.Detections(xyxy=np.array([df_ball_positions[i]]),
-                                        confidence= det.confidence[:1],
-                                        class_id=det.class_id[:1],
-                                        tracker_id=det.tracker_id[:1] if det.tracker_id is not None else None,
-                                        data={k: v[:1] for k, v in det.data.items()}
-                                        )
-                self.incomplete_ball_positions[i] = new_det
+                # process batch if it isn't empty
+                if batch:
+                    converted_positions = [x.xyxy[0] for x in batch]
+                    # attempt to fill Nones via interpolation and backfill
+                    df_ball_positions = pd.DataFrame(converted_positions, columns=['x1', 'y1', 'x2', 'y2'])
+                    df_ball_positions = df_ball_positions.interpolate()
+                    df_ball_positions = df_ball_positions.bfill()
+                    df_ball_positions = df_ball_positions.to_numpy()
+
+                    # convert batch back to Detections object and store in a new pickle
+                    for i in range(len(batch)):
+                        det = batch[i]
+                        if np.isnan(det.xyxy[0]).any():
+                            det.xyxy[0] =np.array([df_ball_positions[i]])
+
+                        store_as_pickle(path='stubs/complete_ball_positions.pkl', data=det)
+
 
 
 
 
     def handle_ball_tracking(self, read_from_stub = False, stub_path = None):
         self.fill_missing_positions()
+        with open('stubs/complete_ball_positions.pkl', "rb") as f, open('stubs/player_positions.pkl', "rb") as f1, open('stubs/annotated_result.pkl', "rb") as f2:
+            current_frame_num = 0
+            print("Processing ball tracking frames")
+            while True:
+                try:
+                    # load data per frame
+                    current_player_positions = pickle.load(f1)
+                    frame = pickle.load(f2)
+                    complete_ball_pos = pickle.load(f)
 
-        for frame_num, frame in enumerate(tqdm(self.annotated_frames, desc="Processing Ball Tracking Frames")):
-            # track player in possession of ball if within distance
+                    player_in_possession = self.player_assigner.assign_ball_to_player(
+                        ball_bbox=complete_ball_pos.xyxy[0],
+                        players=current_player_positions)
+                    if player_in_possession != -1:
+                        player_in_possession = current_player_positions[current_player_positions.tracker_id == player_in_possession]
+                        store_as_pickle(path='stubs/player_in_possession_buffer.pkl',
+                                        data=player_in_possession.tracker_id)
+                    else:
+                        store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=None)
 
-            player_in_possession = self.player_assigner.assign_ball_to_player(ball_bbox=self.incomplete_ball_positions[frame_num].xyxy[0],
-                                                                              players=self.player_positions[frame_num])
-            if player_in_possession != -1:
-                player_in_possession = self.player_positions[frame_num][self.player_positions[frame_num].tracker_id == player_in_possession]
-                store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=player_in_possession.tracker_id)
-            else:
-                store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=None)
+                    # annotate the ball
+                    frame = self.ball_annotator.annotate(frame, complete_ball_pos)
 
-            # go thru annotated frames and annotate the ball
-            frame = self.ball_annotator.annotate(frame, self.incomplete_ball_positions[frame_num])
+                    # go thru annotated frames and annotate the player in possession of ball
+                    if isinstance(player_in_possession, sv.Detections):
+                        frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
 
-            # go thru annotated frames and annotate the player in possession of ball
-            if isinstance(player_in_possession, sv.Detections):
-                frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
+                    store_as_pickle(path='stubs/final_frame_result.pkl', data=frame)
+                    current_frame_num += 1
+                except EOFError:
+                    print("Frames finished")
+                    break
 
-            store_as_pickle(path='stubs/final_frame_result.pkl', data= frame)
+
+
 
 
 

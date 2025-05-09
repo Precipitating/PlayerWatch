@@ -1,10 +1,10 @@
-from trackers.tracker import BallHandler, load_pickle_to_list
-from utils import read_video, save_video
+from trackers.tracker import BallHandler
+from utils import read_video, save_video, load_pickle_as_generator
 from trackers import Tracker
 from split_videos import VideoSplitter
 import supervision as sv
 import torch
-from nicegui import ui, app, background_tasks, run
+from nicegui import ui, app, run
 import webview
 import os
 from audio_crop import AudioCrop
@@ -86,6 +86,11 @@ def run_program(config):
             print(f"Deleted: {file}")
 
 
+    # Get video data
+    video_info = sv.VideoInfo.from_video_path(config['input_video_path'])
+    width, height = video_info.width, video_info.height
+
+
     # AI detection method via ball tracking
     if not all(config.get(key) not in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path', 'ball_model_path']):
         ui.notify('ERROR: Not all inputs set')
@@ -95,12 +100,8 @@ def run_program(config):
     # Output path
     config['annotated_video_path'] = os.path.join(config['output_video_path'], 'output.mp4')
 
-    # Fetch video info
-    video_info = sv.VideoInfo.from_video_path(config['input_video_path'])
-    w, h = video_info.width, video_info.height
-
     # Initialize Tracker
-    tracker = Tracker(config['player_model_path'], config['ball_model_path'], w=w, h=h,config= config)
+    tracker = Tracker(config['player_model_path'], config['ball_model_path'], w=width, h=height,config= config)
     read_video(config['input_video_path'], config['crop_frame_skip'])
 
     # Annotate ball and player positions
@@ -112,6 +113,7 @@ def run_program(config):
         stub_path='stubs/annotation_stub.pk1',
         input_path=config['input_video_path']
     )
+    print("Intialize and annotate DONE")
 
     # Handle ball tracking
     ball_handler = BallHandler(
@@ -122,7 +124,7 @@ def run_program(config):
         read_from_stub=False,
         stub_path='stubs/ball_stub.pk1'
     )
-
+    print("Ball tracking DONE")
     # Split the video based on possession tracking
     frame_gen = read_video(config['input_video_path'])
     video_splitter = VideoSplitter(
@@ -136,9 +138,8 @@ def run_program(config):
     video_splitter.crop_videos()
 
     # Save the final annotated video (not required in release)
-    final_frames = []
-    load_pickle_to_list('stubs/final_frame_result.pkl', container= final_frames)
-    save_video(config['input_video_path'], config['annotated_video_path'], final_frames)
+    final_frames_gen = load_pickle_as_generator(path='stubs/final_frame_result.pkl')
+    save_video(source_path=config['input_video_path'], target_path= config['annotated_video_path'], frames= final_frames_gen)
 
     # Mark the process as finished
     print("Done")
