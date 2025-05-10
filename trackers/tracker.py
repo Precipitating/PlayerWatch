@@ -1,4 +1,4 @@
-import copy
+import gzip
 from ultralytics import YOLO, SAM
 from ultralytics.models.sam import SAM2VideoPredictor
 import supervision as sv
@@ -15,6 +15,9 @@ from transformers import AutoModelForCausalLM, AutoProcessor
 from PIL import Image
 import torch
 
+from utils import read_video
+from utils.video_utils import save_video_stream_frames
+
 sys.path.append('../')
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 TORCH_DTYPE = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -25,12 +28,12 @@ REFEREE_ID = 3
 
 
 def store_as_pickle(path, data):
-    with open(path, 'ab') as f:
+    with gzip.open(path, 'ab') as f:
         pickle.dump(data, f)
         f.flush()
 
 def store_as_pickle_individually(path, data):
-    with open(path, 'ab') as f:
+    with gzip.open(path, 'ab') as f:
         for d in data:
             pickle.dump(d, f)
         f.flush()
@@ -38,7 +41,7 @@ def store_as_pickle_individually(path, data):
 
 
 def load_pickle_to_list(path, container):
-    with open(path, "rb") as f:
+    with gzip.open(path, "rb") as f:
         while True:
             try:
                 container.append(pickle.load(f))
@@ -46,10 +49,12 @@ def load_pickle_to_list(path, container):
                 break
 
 class BallHandler:
-    def __init__(self, ball_dist):
+    def __init__(self, ball_dist, config):
         self.complete_ball_positions = []
         self.player_assigner = player_ball_assign.PlayerBallAssign(ball_dist)
         self.ball_annotator = BallAnnotator(radius=7, buffer_size=10)
+        self.config = config
+        self.final_annotated_video = save_video_stream_frames(config['input_video_path'], config['annotated_video_path'])
 
         self.triangle_annotator = sv.TriangleAnnotator(
             color=sv.Color.from_hex('#FFD700'),
@@ -66,18 +71,10 @@ class BallHandler:
         )
 
 
-
-
-    def load_data(self):
-        files = ['stubs/player_positions.pkl', 'stubs/annotated_result.pkl']
-        #load_pickle_to_list(path= files[0], container=self.player_positions)
-        #load_pickle_to_list(path= files[1], container=self.annotated_frames)
-
-
     # interpolate and fill missing positions
     def fill_missing_positions(self, batch_size = 50):
         # batch load for memory efficiency
-        with open('stubs/ball_positions.pkl', "rb") as f:
+        with gzip.open('stubs/ball_positions.pkl', "rb") as f:
             while True:
                 batch = []
                 # unpickle a batch into a list
@@ -113,39 +110,41 @@ class BallHandler:
 
 
 
-    def handle_ball_tracking(self, read_from_stub = False, stub_path = None):
+    def handle_ball_tracking(self):
         self.fill_missing_positions()
-        with open('stubs/complete_ball_positions.pkl', "rb") as f, open('stubs/player_positions.pkl', "rb") as f1, open('stubs/annotated_result.pkl', "rb") as f2:
+        with gzip.open('stubs/complete_ball_positions.pkl', "rb") as f, gzip.open('stubs/player_positions.pkl', "rb") as f1:
             current_frame_num = 0
             print("Processing ball tracking frames")
             while True:
                 try:
-                    # load data per frame
-                    current_player_positions = pickle.load(f1)
-                    frame = pickle.load(f2)
-                    complete_ball_pos = pickle.load(f)
+                    for frame in read_video(self.config['annotated_players_path']):
+                        # load data per frame
+                        current_player_positions = pickle.load(f1)
+                        complete_ball_pos = pickle.load(f)
 
-                    player_in_possession = self.player_assigner.assign_ball_to_player(
-                        ball_bbox=complete_ball_pos.xyxy[0],
-                        players=current_player_positions)
-                    if player_in_possession != -1:
-                        player_in_possession = current_player_positions[current_player_positions.tracker_id == player_in_possession]
-                        store_as_pickle(path='stubs/player_in_possession_buffer.pkl',
-                                        data=player_in_possession.tracker_id)
-                    else:
-                        store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=None)
+                        player_in_possession = self.player_assigner.assign_ball_to_player(
+                            ball_bbox=complete_ball_pos.xyxy[0],
+                            players=current_player_positions)
+                        if player_in_possession != -1:
+                            player_in_possession = current_player_positions[current_player_positions.tracker_id == player_in_possession]
+                            store_as_pickle(path='stubs/player_in_possession_buffer.pkl',
+                                            data=player_in_possession.tracker_id)
+                        else:
+                            store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=None)
 
-                    # annotate the ball
-                    frame = self.ball_annotator.annotate(frame, complete_ball_pos)
+                        # annotate the ball
+                        frame = self.ball_annotator.annotate(frame, complete_ball_pos)
 
-                    # go thru annotated frames and annotate the player in possession of ball
-                    if isinstance(player_in_possession, sv.Detections):
-                        frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
+                        # go thru annotated frames and annotate the player in possession of ball
+                        if isinstance(player_in_possession, sv.Detections):
+                            frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
 
-                    store_as_pickle(path='stubs/final_frame_result.pkl', data=frame)
-                    current_frame_num += 1
+
+                        self.final_annotated_video.write(frame)
+                        current_frame_num += 1
                 except EOFError:
                     print("Frames finished")
+                    self.final_annotated_video.release()
                     break
 
 
@@ -155,15 +154,22 @@ class BallHandler:
 
 class Tracker:
     def __init__(self, model_path, ball_model_path, w,h, config):
+        if config['sam_2_mode']:
+            self.sam_model = SAM("models/sam/sam2_b.pt")
+            self.sam_prompt = 0
+            self.sam_prompt_set = False
+            self.florence_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base",
+                                                                       torch_dtype=TORCH_DTYPE,
+                                                                       trust_remote_code=True).to(DEVICE)
+            self.processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
+
+
         self.model = YOLO(model_path)
-        self.sam_model = SAM("models/sam/sam2_b.pt")
-        self.sam_prompt = 0
-        self.sam_prompt_set =False
+        self.config = config
         self.ball_model = YOLO(ball_model_path)
         self.tracker = sv.ByteTrack()
-        self.config = config
-        self.florence_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base", torch_dtype=TORCH_DTYPE,trust_remote_code=True).to(DEVICE)
-        self.processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
+        self.annotated_video_handle = save_video_stream_frames(source_path= config['input_video_path'], target_path= config['annotated_players_path'])
+
 
 
         self.ball_tracker = BallTracker(buffer_size=20)
@@ -347,16 +353,9 @@ class Tracker:
 
 
 
-    def initialize_and_annotate(self, input_path, frame_gen, batch_size, read_from_stub=False, stub_path=None):
-
-        if read_from_stub and stub_path is not None and os.path.exists(stub_path):
-            with open(stub_path, 'rb') as f:
-                processed_frames = pickle.load(f)
-                print("found stub")
-                return processed_frames
+    def initialize_and_annotate(self, frame_gen):
 
         frame_batch = []
-
         for frame in tqdm(frame_gen, desc="Processing Frames"):
             frame_batch.append(frame)
 
@@ -364,14 +363,14 @@ class Tracker:
             if not self.config['sam_2_mode']:
                 self.get_ball_detections(frame)
             elif not self.sam_prompt_set:
-                self.get_sam_detections(input_path, frame)
+                self.get_sam_detections(self.config['input_video_path'], frame)
                 if not self.sam_prompt_set:
                     ui.notify('First frame ball not found')
                     return False
 
 
 
-            if len(frame_batch) >= batch_size:
+            if len(frame_batch) >= self.config['batch_size']:
                 # if batch size reached process it
                 detections_batch = self.model.predict(frame_batch, conf= 0.3)
 
@@ -391,6 +390,8 @@ class Tracker:
                 self.process_frame_batch(detections=detections,
                                          frame_in_batch=frame_in_batch)
 
+
+        self.annotated_video_handle.release()
         return True
 
 
@@ -425,8 +426,8 @@ class Tracker:
         annotated_frame = self.ellipse_annotator.annotate(annotated_frame, all_detections)
         annotated_frame = self.label_annotator.annotate(annotated_frame, all_detections, labels)
 
-        # Append annotated frame to results
-        store_as_pickle(path='stubs/annotated_result.pkl', data=annotated_frame)
+        # write frame to an open video handle
+        self.annotated_video_handle.write(annotated_frame)
 
 
 

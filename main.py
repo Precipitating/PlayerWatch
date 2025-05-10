@@ -1,5 +1,5 @@
 from trackers.tracker import BallHandler
-from utils import read_video, save_video, load_pickle_as_generator
+from utils import read_video
 from trackers import Tracker
 from split_videos import VideoSplitter
 import supervision as sv
@@ -17,6 +17,7 @@ config = {
     'input_video_path': '',
     'output_video_path': '',
     'annotated_video_path': '',
+    'annotated_players_path': 'stubs/annotated_players.mp4',
     'player_model_path': '',
     'ball_model_path': '',
     'batch_size': 20,
@@ -76,15 +77,19 @@ async def choose_output_folder(button):
         button.classes('bg-green', remove='bg-red')
 
 
-def run_program(config):
-    # delete previous stubs if applicable
+def delete_working_files():
     stub_path = os.path.join(os.getcwd(), 'stubs')
     if os.path.isdir(stub_path):
-        pkl_files = glob.glob(os.path.join(stub_path, '*.pkl'))
-        for file in pkl_files:
-            os.remove(file)
-            print(f"Deleted: {file}")
+        for ext in ['*.pkl', '*.mp4']:
+            files = glob.glob(os.path.join(stub_path, ext))
+            for file in files:
+                os.remove(file)
+                print(f"Deleted: {file}")
 
+
+def run_program(config):
+    # delete previous working files if applicable
+    delete_working_files()
 
     # Get video data
     video_info = sv.VideoInfo.from_video_path(config['input_video_path'])
@@ -107,23 +112,17 @@ def run_program(config):
     # Annotate ball and player positions
     frame_gen = read_video(config['input_video_path'])
     tracker.initialize_and_annotate(
-        frame_gen=frame_gen,
-        batch_size=config['batch_size'],
-        read_from_stub=False,
-        stub_path='stubs/annotation_stub.pk1',
-        input_path=config['input_video_path']
+        frame_gen=frame_gen
     )
     print("Intialize and annotate DONE")
 
     # Handle ball tracking
     ball_handler = BallHandler(
-        ball_dist=config['player_to_ball_dist']
+        ball_dist=config['player_to_ball_dist'],
+        config= config
     )
 
-    ball_handler.handle_ball_tracking(
-        read_from_stub=False,
-        stub_path='stubs/ball_stub.pk1'
-    )
+    ball_handler.handle_ball_tracking()
     print("Ball tracking DONE")
     # Split the video based on possession tracking
     frame_gen = read_video(config['input_video_path'])
@@ -137,11 +136,8 @@ def run_program(config):
     )
     video_splitter.crop_videos()
 
-    # Save the final annotated video (not required in release)
-    final_frames_gen = load_pickle_as_generator(path='stubs/final_frame_result.pkl')
-    save_video(source_path=config['input_video_path'], target_path= config['annotated_video_path'], frames= final_frames_gen)
-
     # Mark the process as finished
+    delete_working_files()
     print("Done")
 
 
