@@ -54,7 +54,8 @@ class BallHandler:
         self.player_assigner = player_ball_assign.PlayerBallAssign(ball_dist)
         self.ball_annotator = BallAnnotator(radius=7, buffer_size=10)
         self.config = config
-        self.final_annotated_video = save_video_stream_frames(config['input_video_path'], config['annotated_video_path'])
+        if config['save_output_video']:
+            self.final_annotated_video = save_video_stream_frames(config['input_video_path'], config['annotated_video_path'])
 
         self.triangle_annotator = sv.TriangleAnnotator(
             color=sv.Color.from_hex('#FFD700'),
@@ -109,42 +110,60 @@ class BallHandler:
 
 
 
+    def process_ball_tracking(self, f1, f):
+        if self.config['save_output_video']:
+            for frame in read_video(self.config['annotated_players_path']):
+                # load data per frame
+                current_player_positions = pickle.load(f1)
+                complete_ball_pos = pickle.load(f)
+
+                player_in_possession = self.player_assigner.assign_ball_to_player(
+                    ball_bbox=complete_ball_pos.xyxy[0],
+                    players=current_player_positions)
+                if player_in_possession != -1:
+                    player_in_possession = current_player_positions[
+                        current_player_positions.tracker_id == player_in_possession]
+                    store_as_pickle(path='stubs/player_in_possession_buffer.pkl',
+                                    data=player_in_possession.tracker_id)
+                else:
+                    store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=None)
+
+                # annotate the ball
+                frame = self.ball_annotator.annotate(frame, complete_ball_pos)
+
+                # go thru annotated frames and annotate the player in possession of ball
+                if isinstance(player_in_possession, sv.Detections):
+                    frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
+
+                self.final_annotated_video.write(frame)
+        else:
+            # load data per frame
+            current_player_positions = pickle.load(f1)
+            complete_ball_pos = pickle.load(f)
+
+            player_in_possession = self.player_assigner.assign_ball_to_player(
+                ball_bbox=complete_ball_pos.xyxy[0],
+                players=current_player_positions)
+            if player_in_possession != -1:
+                player_in_possession = current_player_positions[
+                    current_player_positions.tracker_id == player_in_possession]
+                store_as_pickle(path='stubs/player_in_possession_buffer.pkl',
+                                data=player_in_possession.tracker_id)
+            else:
+                store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=None)
+
 
     def handle_ball_tracking(self):
         self.fill_missing_positions()
         with gzip.open('stubs/complete_ball_positions.pkl', "rb") as f, gzip.open('stubs/player_positions.pkl', "rb") as f1:
-            current_frame_num = 0
             print("Processing ball tracking frames")
             while True:
                 try:
-                    for frame in read_video(self.config['annotated_players_path']):
-                        # load data per frame
-                        current_player_positions = pickle.load(f1)
-                        complete_ball_pos = pickle.load(f)
-
-                        player_in_possession = self.player_assigner.assign_ball_to_player(
-                            ball_bbox=complete_ball_pos.xyxy[0],
-                            players=current_player_positions)
-                        if player_in_possession != -1:
-                            player_in_possession = current_player_positions[current_player_positions.tracker_id == player_in_possession]
-                            store_as_pickle(path='stubs/player_in_possession_buffer.pkl',
-                                            data=player_in_possession.tracker_id)
-                        else:
-                            store_as_pickle(path='stubs/player_in_possession_buffer.pkl', data=None)
-
-                        # annotate the ball
-                        frame = self.ball_annotator.annotate(frame, complete_ball_pos)
-
-                        # go thru annotated frames and annotate the player in possession of ball
-                        if isinstance(player_in_possession, sv.Detections):
-                            frame = self.triangle_ball_possessor_annotator.annotate(frame, player_in_possession)
-
-
-                        self.final_annotated_video.write(frame)
-                        current_frame_num += 1
+                    self.process_ball_tracking(f1,f)
                 except EOFError:
                     print("Frames finished")
-                    self.final_annotated_video.release()
+                    if self.config['save_output_video']:
+                        self.final_annotated_video.release()
                     break
 
 
@@ -168,7 +187,8 @@ class Tracker:
         self.config = config
         self.ball_model = YOLO(ball_model_path)
         self.tracker = sv.ByteTrack()
-        self.annotated_video_handle = save_video_stream_frames(source_path= config['input_video_path'], target_path= config['annotated_players_path'])
+        if config['save_output_video']:
+            self.annotated_video_handle = save_video_stream_frames(source_path= config['input_video_path'], target_path= config['annotated_players_path'])
 
 
 
@@ -310,7 +330,6 @@ class Tracker:
 
     def get_sam_detections(self, input_path, frame):
 
-        # create filler sv.Detections
         filler_detection = sv.Detections.empty()
         filler_detection.xyxy = np.array([np.nan, np.nan, np.nan, np.nan])
 
@@ -318,25 +337,32 @@ class Tracker:
         filler_detection.confidence = np.append(filler_detection.confidence,
                                                 50.0)  # filler value, doesn't matter as its getting predicted
 
-
         # attempt to get the ball bbox via florence (first frame)
         ball_bbox = self.detect_ball_via_florence(Image.fromarray(frame))
         if ball_bbox:
             self.sam_prompt = ball_bbox
             overrides = dict(conf=0.3, task="segment", mode="predict", imgsz=1024, model="sam2_b.pt")
-            predictor = SAM2VideoPredictor(overrides=overrides)
-            results= predictor(source= input_path, stream=True, bboxes= self.sam_prompt)
-            os.makedirs('stubs', exist_ok=True)
-            for result in results:
-                if len(result.boxes.xyxy) != 0:
-                    print(result.boxes.xyxy.cpu().numpy())
-                    filler_detection.xyxy = result.boxes.xyxy.cpu().numpy()
-                    store_as_pickle(path='stubs/ball_positions.pkl', data=filler_detection)
 
-                else:
-                    print("Fake frame needed for SAM")
-                    filler_detection.xyxy = np.array([np.nan, np.nan, np.nan, np.nan])
-                    store_as_pickle(path='stubs/ball_positions.pkl', data=filler_detection)
+            # Initialize the predictor
+            predictor = SAM2VideoPredictor(overrides=overrides)
+
+            try:
+                # Use the predictor to get results
+                results = predictor(source=input_path, stream=True, bboxes=self.sam_prompt)
+                os.makedirs('stubs', exist_ok=True)
+
+                for result in results:
+                    if len(result.boxes.xyxy) != 0:
+                        print(result.boxes.xyxy.cpu().numpy())
+                        filler_detection.xyxy = result.boxes.xyxy.cpu().numpy()
+                        store_as_pickle(path='stubs/ball_positions.pkl', data=filler_detection)
+                    else:
+                        print("Fake frame needed for SAM")
+                        filler_detection.xyxy = np.array([np.nan, np.nan, np.nan, np.nan])
+                        store_as_pickle(path='stubs/ball_positions.pkl', data=filler_detection)
+            except Exception as e:
+                print(f"SAM Detection error {e}")
+
 
 
             self.sam_prompt_set = True
@@ -379,7 +405,7 @@ class Tracker:
                     self.process_frame_batch(detections= detections,
                                              frame_in_batch= frame_in_batch)
                 # Reset the batch
-                frame_batch.clear()
+                frame_batch = []
 
             # handle rest of frames
         if len(frame_batch) > 0:
@@ -391,7 +417,8 @@ class Tracker:
                                          frame_in_batch=frame_in_batch)
 
 
-        self.annotated_video_handle.release()
+        if self.config['save_output_video']:
+            self.annotated_video_handle.release()
         return True
 
 
@@ -427,7 +454,8 @@ class Tracker:
         annotated_frame = self.label_annotator.annotate(annotated_frame, all_detections, labels)
 
         # write frame to an open video handle
-        self.annotated_video_handle.write(annotated_frame)
+        if self.config['save_output_video']:
+            self.annotated_video_handle.write(annotated_frame)
 
 
 

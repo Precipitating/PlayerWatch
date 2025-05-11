@@ -1,3 +1,5 @@
+import gc
+
 from trackers.tracker import BallHandler
 from utils import read_video
 from trackers import Tracker
@@ -23,7 +25,7 @@ config = {
     'batch_size': 20,
     'player_to_ball_dist': 70,
     'grace_period': 30,
-    'crop_frame_skip': 2,
+    'save_output_video': False,
     'frames_considered_possession': 20,
     'ball_frame_forgiveness': 3,
 
@@ -107,7 +109,6 @@ def run_program(config):
 
     # Initialize Tracker
     tracker = Tracker(config['player_model_path'], config['ball_model_path'], w=width, h=height,config= config)
-    read_video(config['input_video_path'], config['crop_frame_skip'])
 
     # Annotate ball and player positions
     frame_gen = read_video(config['input_video_path'])
@@ -138,6 +139,8 @@ def run_program(config):
 
     # Mark the process as finished
     delete_working_files()
+    gc.collect()
+    torch.cuda.empty_cache()
     print("Done")
 
 
@@ -304,12 +307,6 @@ def main():
                       on_change=lambda e: (config.update({'batch_size': int(e.value)}),
                                            print(f"Batch size set to: {e.value}")))
 
-            ui.number(label="Classifier Frame Skip", value=config['crop_frame_skip'],
-                      step=1,
-                      precision=0,
-                      suffix='fr',
-                      on_change=lambda e: (config.update({'crop_frame_skip': int(e.value)}),
-                                           print(f"Classifier frame skip set to: {e.value}")))
 
             ui.number(label="Possession threshold",
                       value=config['frames_considered_possession'],
@@ -326,9 +323,14 @@ def main():
                       suffix='fr',
                       on_change=lambda e: (config.update({'ball_frame_forgiveness': int(e.value)}),
                                            print(f"Ball frame forgiveness set to: {e.value}")))
-        with ui.row().classes('w-full justify-center').bind_visibility_from(ai_ball_detection, 'value'):
-            sam_2_mode = ui.checkbox('SAM-2 Ball Track',
+        with ui.grid(columns=2).classes('items-center gap-4').bind_visibility_from(ai_ball_detection, 'value'):
+
+            ui.checkbox('SAM-2 Ball Track',
                                         on_change=lambda e: config.update({'sam_2_mode': e.value}))
+            ui.checkbox(text="Save debug video",
+                        value=config['save_output_video'],
+                        on_change=lambda e: (config.update({'save_output_video': e.value}),
+                                           print(f"Save annotated video set to: {e.value}")))
 
         ui.separator()
         with ui.row().classes('w-full justify-center'):
