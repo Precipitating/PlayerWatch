@@ -1,5 +1,4 @@
 import gc
-
 from trackers.tracker import BallHandler
 from utils import read_video
 from trackers import Tracker
@@ -28,6 +27,7 @@ config = {
     'save_output_video': False,
     'frames_considered_possession': 20,
     'ball_frame_forgiveness': 3,
+    'slice_threads': 1,
 
     'audio_crop': False,
     'ball_track_crop': False,
@@ -323,6 +323,12 @@ def main():
                       suffix='fr',
                       on_change=lambda e: (config.update({'ball_frame_forgiveness': int(e.value)}),
                                            print(f"Ball frame forgiveness set to: {e.value}")))
+            ui.number(label="Slice Threads",
+                      value=config['slice_threads'],
+                      step=1,
+                      precision=0,
+                      on_change=lambda e: (config.update({'slice_threads': int(e.value)}),
+                                           print(f"Slice Threads set to: {e.value}")))
         with ui.grid(columns=2).classes('items-center gap-4').bind_visibility_from(ai_ball_detection, 'value'):
 
             ui.checkbox('SAM-2 Ball Track',
