@@ -21,7 +21,7 @@ config = {
     'annotated_players_path': 'stubs/annotated_players.mp4',
     'player_model_path': '',
     'ball_model_path': '',
-    'batch_size': 20,
+    'batch_size': 4,
     'player_to_ball_dist': 70,
     'grace_period': 30,
     'save_output_video': False,
@@ -38,12 +38,13 @@ config = {
     'audio_crop_duration': 5,
     'audio_word_similarity': 70,
 
-    'sam_2_mode': False
+    'sam_2_mode': False,
+    'sam_2_model_path': ''
 }
 
-async def choose_file(button, input_video = False,ball_model = False, player_model = False):
-    if ball_model or player_model:
-        files = await app.native.main_window.create_file_dialog(file_types=["YOLO Model (*.pt)"])
+async def choose_file(button, input_video = False,ball_model = False, player_model = False, sam_2_model = False):
+    if ball_model or player_model or sam_2_model:
+        files = await app.native.main_window.create_file_dialog(file_types=["PT Model (*.pt)"])
         if files:
             ui.notify("File set")
 
@@ -52,10 +53,14 @@ async def choose_file(button, input_video = False,ball_model = False, player_mod
                 button.classes('bg-green', remove='bg-red')
                 print(config['ball_model_path'])
 
-            else:
+            elif player_model:
                 config['player_model_path'] = files[0]
                 button.classes('bg-green', remove='bg-red')
                 print(config['player_model_path'])
+            else:
+                config['sam_2_model_path'] = files[0]
+                button.classes('bg-green', remove='bg-red')
+                print(config['sam_2_model_path'])
 
     else:
         files = await app.native.main_window.create_file_dialog(file_types=["Video file (*.mp4;*.mov;*.avi;*.mkv;*.flv;*.wmv;*.webm;*.m4v)"])
@@ -89,6 +94,28 @@ def delete_working_files():
                 print(f"Deleted: {file}")
 
 
+
+def ball_tracking_error_checking():
+    # ERROR CHECKING
+    if all(config.get(key) in [None, ''] for key in ['ball_model_path', 'sam_2_model_path']):
+        ui.notify('ERROR: Set ball model or SAM 2 model')
+        print(f"Ball model or SAM model not set")
+        return False
+
+    if config['sam_2_mode']:
+        if not config['sam_2_model_path']:
+            ui.notify('ERROR: SAM2 model is required')
+            print(f"SAM Model not set")
+            return False
+
+    # AI detection method via ball tracking
+    if any(config.get(key) in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path']):
+        ui.notify('ERROR: Not all inputs set')
+        print(f"RUN PROGRAM ERROR")
+        return False
+
+    return True
+
 def run_program(config):
     # delete previous working files if applicable
     delete_working_files()
@@ -96,13 +123,6 @@ def run_program(config):
     # Get video data
     video_info = sv.VideoInfo.from_video_path(config['input_video_path'])
     width, height = video_info.width, video_info.height
-
-
-    # AI detection method via ball tracking
-    if not all(config.get(key) not in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path', 'ball_model_path']):
-        ui.notify('ERROR: Not all inputs set')
-        print(f"RUN PROGRAM ERROR")
-        return
 
     # Output path
     config['annotated_video_path'] = os.path.join(config['output_video_path'], 'output.mp4')
@@ -115,6 +135,7 @@ def run_program(config):
     tracker.initialize_and_annotate(
         frame_gen=frame_gen
     )
+
     print("Intialize and annotate DONE")
 
     # Handle ball tracking
@@ -139,13 +160,20 @@ def run_program(config):
 
     # Mark the process as finished
     delete_working_files()
-    gc.collect()
+
+    # ensure cleanup occurs
+    tracker.cleanup()
+    ball_handler.cleanup()
+    video_splitter.cleanup()
+    del tracker
+    del ball_handler
+    del video_splitter
     torch.cuda.empty_cache()
     print("Done")
 
 
 async def run_audio_crop_program(config):
-    if config['input_video_path'] and config['output_video_path'] and config['audio_crop_player_name']:
+    if all(config.get(k) for k in ['input_video_path', 'output_video_path', 'audio_crop_player_name']):
         audio_crop = AudioCrop(target_name=config['audio_crop_player_name'],
                                input_file=config['input_video_path'],
                                output_dir=config['output_video_path'],
@@ -162,7 +190,7 @@ async def run_audio_crop_program(config):
             print('Error during transcription:', e)
             ui.notify(f'Error: {e}')
     else:
-        ui.notify('Parameters not filled/correct')
+        ui.notify('ERROR: Parameters not filled/correct')
 
 
 
@@ -171,13 +199,14 @@ async def run_main_async(button, spinner):
         if config['audio_crop']:
             await run_audio_crop_program(config.copy())
         elif config['ball_track_crop']:
-            try:
-                await run.cpu_bound(run_program, config.copy())
-            except Exception as e:
-                print('Error:', e)
-                ui.notify(f'Error: {e}')
+            if ball_tracking_error_checking():
+                try:
+                    await run.cpu_bound(run_program, config.copy())
+                except Exception as e:
+                    print('Error:', e)
+                    ui.notify(f'ERROR: {e}')
         else:
-            ui.notify("Select a method.")
+            ui.notify("ERROR: Select a method.")
 
 @contextmanager
 def disable(button: ui.button, spinner: ui.spinner):
@@ -214,6 +243,9 @@ def main():
 
             ui.label("Ball Detection Model:").classes("self-center")
             ball_model_button = ui.button('Browse', on_click= lambda: choose_file(button= ball_model_button, ball_model= True)).classes('text-sm px-6 py-1 bg-red')
+
+            ui.label("SAM 2 Model:").classes("self-center")
+            sam_2_model = ui.button('Browse', on_click= lambda: choose_file(button= sam_2_model, sam_2_model= True)).classes('text-sm px-6 py-1 bg-red')
 
         ui.separator()
         # CHOOSE METHOD
@@ -350,7 +382,7 @@ def main():
 
 
     app.native.window_args['resizable'] = False
-    ui.run(native=True, window_size=(430,830), reload= False)
+    ui.run(native=True, window_size=(430,830), reload= False, title="PlayerWatch")
 
 
 

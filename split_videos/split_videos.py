@@ -2,6 +2,7 @@ from tqdm import tqdm
 import os
 from trackers.tracker import load_pickle_to_list
 from utils import save_video
+import gc
 
 class VideoSplitter:
     def __init__(self, frame_gen, source_path, grace_period, frames_considered_possession, output_folder, ball_frame_forgiveness):
@@ -14,6 +15,10 @@ class VideoSplitter:
         self.ball_frame_forgiveness = ball_frame_forgiveness
         self.output_dir = output_folder
 
+    def cleanup(self):
+        for attr in list(self.__dict__.keys()):
+            delattr(self, attr)
+        gc.collect()
 
     def is_possession_consistent(self, current_idx, steps_ahead=10, forgive_frames=3):
         # ensure we're not going over the video's length

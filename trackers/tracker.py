@@ -16,6 +16,7 @@ from sports.common.ball import BallTracker, BallAnnotator
 from transformers import AutoModelForCausalLM, AutoProcessor
 from PIL import Image
 import torch
+import gc
 
 from utils import read_video
 from utils.video_utils import save_video_stream_frames
@@ -67,6 +68,11 @@ class BallHandler:
             height=21,
             outline_thickness=1
         )
+
+    def cleanup(self):
+        for attr in list(self.__dict__.keys()):
+            delattr(self, attr)
+        gc.collect()
 
     # interpolate and fill missing positions
     def fill_missing_positions(self, batch_size=50):
@@ -145,6 +151,9 @@ class BallHandler:
             else:
                 pickle.dump(None, f2)
 
+
+
+
     def handle_ball_tracking(self):
         self.fill_missing_positions()
         with (gzip.open(filename='stubs/complete_ball_positions.pkl',mode= "rb") as f,
@@ -166,7 +175,7 @@ class BallHandler:
 class Tracker:
     def __init__(self, model_path, ball_model_path, w, h, config):
         if config['sam_2_mode']:
-            self.sam_model = SAM("models/sam/sam2_b.pt")
+            self.sam_model = SAM(config['sam_2_model_path'])
             self.sam_prompt = 0
             self.sam_prompt_set = False
             self.florence_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base",
@@ -216,6 +225,12 @@ class Tracker:
         self.vertex_annotator_2 = sv.VertexAnnotator(
             color=sv.Color.from_hex('#00BFFF'),
             radius=8)
+
+    def cleanup(self):
+        for attr in list(self.__dict__.keys()):
+            delattr(self, attr)
+        gc.collect()
+
 
     def get_player_in_possession(self, ball_bbox, players, assigner):
         assigned_player = assigner.assign_ball_to_player(players=players, ball_bbox=ball_bbox)
@@ -314,7 +329,7 @@ class Tracker:
     def get_sam_detections(self, input_path, frame, ball_positions_file):
 
         filler_detection = sv.Detections.empty()
-        filler_detection.xyxy = np.array([np.nan, np.nan, np.nan, np.nan])
+        filler_detection.xyxy = np.array([[np.nan, np.nan, np.nan, np.nan]])
 
         filler_detection.class_id = np.append(filler_detection.class_id, 0)
         filler_detection.confidence = np.append(filler_detection.confidence,
@@ -341,7 +356,7 @@ class Tracker:
                         pickle.dump(filler_detection, ball_positions_file)
                     else:
                         print("Fake frame needed for SAM")
-                        filler_detection.xyxy = np.array([np.nan, np.nan, np.nan, np.nan])
+                        filler_detection.xyxy = np.array([[np.nan, np.nan, np.nan, np.nan]])
                         pickle.dump(filler_detection, ball_positions_file)
             except Exception as e:
                 print(f"SAM Detection error {e}")

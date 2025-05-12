@@ -1,6 +1,7 @@
 #from pywhispercpp.model import Model
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 import torch
+from ffmpeg import overwrite_output
 from rapidfuzz import fuzz
 import ffmpeg
 import os
@@ -37,6 +38,6 @@ class AudioCrop:
         os.makedirs(new_folder_path, exist_ok=True)
         output_path = os.path.join(new_folder_path, f"{start}.mp4")
         print(output_path)
-        ffmpeg.input(self.input_video, ss=start).output(output_path, t=duration).run()
+        ffmpeg.input(self.input_video, ss=start).output(output_path, t=duration).run(overwrite_output= True)
 
 
