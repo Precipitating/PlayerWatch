@@ -1,7 +1,5 @@
-#from pywhispercpp.model import Model
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 import torch
-from ffmpeg import overwrite_output
 from rapidfuzz import fuzz
 import ffmpeg
 import os

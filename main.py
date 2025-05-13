@@ -1,17 +1,18 @@
-import gc
+import asyncio
+
 from trackers.tracker import BallHandler
 from utils import read_video
 from trackers import Tracker
 from split_videos import VideoSplitter
 import supervision as sv
 import torch
-from nicegui import ui, app, run
+from nicegui import ui, app, run, background_tasks, Client
 import webview
 import os
 from audio_crop import AudioCrop
 from contextlib import contextmanager
 import glob
-
+from concurrent.futures import ProcessPoolExecutor
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 config = {
@@ -98,23 +99,30 @@ def delete_working_files():
 def ball_tracking_error_checking():
     # ERROR CHECKING
     if all(config.get(key) in [None, ''] for key in ['ball_model_path', 'sam_2_model_path']):
-        ui.notify('ERROR: Set ball model or SAM 2 model')
+        notify('ERROR: Set ball model or SAM 2 model')
         print(f"Ball model or SAM model not set")
         return False
 
     if config['sam_2_mode']:
         if not config['sam_2_model_path']:
-            ui.notify('ERROR: SAM2 model is required')
+            notify('ERROR: SAM2 model is required')
             print(f"SAM Model not set")
             return False
 
     # AI detection method via ball tracking
     if any(config.get(key) in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path']):
-        ui.notify('ERROR: Not all inputs set')
+        notify('ERROR: Not all inputs set')
         print(f"RUN PROGRAM ERROR")
         return False
 
     return True
+
+
+# for background tasks (as multi processes don't know which client to notify)
+def notify(msg: str):
+    for client in Client.instances.values():
+        with client:
+            ui.notify(msg)
 
 def run_program(config):
     # delete previous working files if applicable
@@ -161,18 +169,12 @@ def run_program(config):
     # Mark the process as finished
     delete_working_files()
 
-    # ensure cleanup occurs
-    tracker.cleanup()
-    ball_handler.cleanup()
-    video_splitter.cleanup()
-    del tracker
-    del ball_handler
-    del video_splitter
-    torch.cuda.empty_cache()
+    notify("Complete")
     print("Done")
 
 
 async def run_audio_crop_program(config):
+    loop = asyncio.get_running_loop()
     if all(config.get(k) for k in ['input_video_path', 'output_video_path', 'audio_crop_player_name']):
         audio_crop = AudioCrop(target_name=config['audio_crop_player_name'],
                                input_file=config['input_video_path'],
@@ -180,33 +182,38 @@ async def run_audio_crop_program(config):
                                batch_size=config['whisper_batch_size'],
                                model_size=config['whisper_model'])
         try:
-            await run.cpu_bound(audio_crop.start_transcription,
-                                config['audio_start_time_offset'],
-                                config['audio_crop_duration'],
-                                config['audio_word_similarity'])
-            ui.notify("Complete")
+            with ProcessPoolExecutor() as executor:
+                await loop.run_in_executor(executor, audio_crop.start_transcription,
+                                    config['audio_start_time_offset'],
+                                    config['audio_crop_duration'],
+                                    config['audio_word_similarity'])
+            notify("Complete")
             print("Done ")
         except Exception as e:
             print('Error during transcription:', e)
-            ui.notify(f'Error: {e}')
+            notify(f'Error: {e}')
     else:
-        ui.notify('ERROR: Parameters not filled/correct')
+        notify('ERROR: Parameters not filled/correct')
 
 
 
 async def run_main_async(button, spinner):
+    loop = asyncio.get_running_loop()
     with disable(button, spinner):
         if config['audio_crop']:
             await run_audio_crop_program(config.copy())
         elif config['ball_track_crop']:
             if ball_tracking_error_checking():
                 try:
-                    await run.cpu_bound(run_program, config.copy())
+                    with ProcessPoolExecutor() as executor:
+                        await loop.run_in_executor(executor,run_program, config.copy())
+
+                    #await run.cpu_bound(run_program, config.copy())
                 except Exception as e:
                     print('Error:', e)
-                    ui.notify(f'ERROR: {e}')
+                    notify(f'ERROR: {e}')
         else:
-            ui.notify("ERROR: Select a method.")
+            notify("ERROR: Select a method.")
 
 @contextmanager
 def disable(button: ui.button, spinner: ui.spinner):
@@ -372,7 +379,7 @@ def main():
 
         ui.separator()
         with ui.row().classes('w-full justify-center'):
-            run_button = ui.button('Run', on_click=lambda e: run_main_async(run_button, processing_spinner))
+            run_button = ui.button('Run', on_click=lambda e: background_tasks.create(run_main_async(run_button, processing_spinner)))
 
         with ui.row().classes('w-full justify-center'):
             processing_spinner = ui.spinner()

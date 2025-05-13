@@ -1,6 +1,5 @@
 import gzip
 import itertools
-
 from ultralytics import YOLO, SAM
 from ultralytics.models.sam import SAM2VideoPredictor
 import supervision as sv
@@ -17,7 +16,6 @@ from transformers import AutoModelForCausalLM, AutoProcessor
 from PIL import Image
 import torch
 import gc
-
 from utils import read_video
 from utils.video_utils import save_video_stream_frames
 
@@ -68,11 +66,6 @@ class BallHandler:
             height=21,
             outline_thickness=1
         )
-
-    def cleanup(self):
-        for attr in list(self.__dict__.keys()):
-            delattr(self, attr)
-        gc.collect()
 
     # interpolate and fill missing positions
     def fill_missing_positions(self, batch_size=50):
@@ -226,12 +219,6 @@ class Tracker:
             color=sv.Color.from_hex('#00BFFF'),
             radius=8)
 
-    def cleanup(self):
-        for attr in list(self.__dict__.keys()):
-            delattr(self, attr)
-        gc.collect()
-
-
     def get_player_in_possession(self, ball_bbox, players, assigner):
         assigned_player = assigner.assign_ball_to_player(players=players, ball_bbox=ball_bbox)
         if assigned_player != -1:
@@ -375,6 +362,7 @@ class Tracker:
             yield batch
 
     def initialize_and_annotate(self, frame_gen):
+        os.makedirs('stubs', exist_ok=True)
         with (gzip.open(filename='stubs/player_positions.pkl', mode='ab') as f,
               gzip.open(filename='stubs/ball_positions.pkl', mode='ab') as f1):
 
