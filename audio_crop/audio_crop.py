@@ -15,7 +15,19 @@ class AudioCrop:
         self.output_dir = output_dir
         self.batch_size = batch_size
 
-    # transcribe the video and get the crop durations
+    """
+    Main function responsible for using faster-whisper to find the target_name via word timestamping,
+    checking if its similar enough via rapidfuzz, and cropping.
+    
+    It goes through word by word, finding if its similar enough and uses that as the start point of the crop.
+    It then crops at a fixed duration from the word start (+ offset if specified) and saves the video (using ffmpeg)
+
+    Args:
+        start_time_offset(int): An offset in seconds from when the target_name is detected
+        crop_duration(int): How long the crop should be (starting from the start_time + start_time_offset)
+        similarity(float): The percentage of how similar the word should be to be considered correct.
+
+    """
     def start_transcription(self,start_time_offset, crop_duration, similarity):
         print("Starting transcription...")
         model = WhisperModel(self.model_size, device= DEVICE, compute_type="auto")
@@ -30,7 +42,15 @@ class AudioCrop:
                     start_time = word.start + start_time_offset
                     self.start_cropping(start_time,float(crop_duration))
 
+    """
+    Uses ffmpeg to save the video, with provided parameters from start_transcription
+    Output path is created and the name of the file will be the start time.
 
+    Args:
+        start(int): The start time of the video (in seconds)
+        duration(int): How long the crop should starting from start (seconds)
+
+    """
     def start_cropping(self, start, duration):
         new_folder_path = os.path.join(self.output_dir, self.target_name)
         os.makedirs(new_folder_path, exist_ok=True)

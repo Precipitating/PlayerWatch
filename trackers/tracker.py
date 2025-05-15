@@ -15,7 +15,6 @@ from sports.common.ball import BallTracker, BallAnnotator
 from transformers import AutoModelForCausalLM, AutoProcessor
 from PIL import Image
 import torch
-import gc
 from utils import read_video
 from utils.video_utils import save_video_stream_frames
 
@@ -26,12 +25,6 @@ BALL_ID = 0
 GOALKEEPER_ID = 1
 PLAYER_ID = 2
 REFEREE_ID = 3
-
-
-def store_as_pickle(path, data):
-    with gzip.open(path, 'ab') as f:
-        pickle.dump(data, f)
-        f.flush()
 
 
 def load_pickle_to_list(path, container):
@@ -67,8 +60,18 @@ class BallHandler:
             outline_thickness=1
         )
 
-    # interpolate and fill missing positions
-    def fill_missing_positions(self, batch_size=50):
+    """
+    Loads a pickle of sv.Detections of the ball frame by frame, formats it to pandas Dataframe via the
+    ball's bounding box dimensions and interpolates non detections (determined if the ball's xyxy is np.nan)
+
+    Args:
+        batch_size (int): Batch size to process data X at a time (to prevent loading all the positions into memory) 
+
+    Saves:
+        ball_positions.pkl but with the gap detections interpolated to complete_ball_positions.pkl
+        
+    """
+    def fill_missing_positions(self, batch_size=100):
         # batch load for memory efficiency
         with gzip.open(filename='stubs/ball_positions.pkl', mode="rb") as f, gzip.open(
                 filename='stubs/complete_ball_positions.pkl', mode="ab") as f1:
@@ -104,6 +107,24 @@ class BallHandler:
                         pickle.dump(det, f1)
             f1.flush()
 
+    """
+    This function does two things:
+    1.  Determines which player is in possession of the ball per frame and saves the player's tracker id to
+        player_in_possession_buffer.pkl (if no possession, then saves None)
+        
+    2. IF save_video_output, annotates the ball and player in possession to the already player annotated video
+       in stubs/annotated_players_path.mp4
+
+    Args:
+        f1 (int): Ball positions pickle file (read mode)
+        f (int): Player positions pickle file (read mode)
+        f2 (int): Player_in_possession pickle file (append binary mode)
+
+    Saves:
+        player_in_possession.pkl with possession per frame
+        IF save_output_video: (output video path)/output.mp4 frames appended via self.final_annotated_video
+
+    """
     def process_ball_tracking(self, f1, f, f2):
         if self.config['save_output_video']:
             for frame in read_video(self.config['annotated_players_path']):
@@ -144,9 +165,11 @@ class BallHandler:
             else:
                 pickle.dump(None, f2)
 
-
-
-
+    """:
+    Runs fill_missing_positions and then process_ball_tracking
+    Saves:
+        self.final.annotated_video frames fully completed and released (saved)
+    """
     def handle_ball_tracking(self):
         self.fill_missing_positions()
         with (gzip.open(filename='stubs/complete_ball_positions.pkl',mode= "rb") as f,
@@ -167,6 +190,8 @@ class BallHandler:
 
 class Tracker:
     def __init__(self, model_path, ball_model_path, w, h, config):
+        self.config = config
+        # SAM2 variables
         if config['sam_2_mode']:
             self.sam_model = SAM(config['sam_2_model_path'])
             self.sam_prompt = 0
@@ -176,49 +201,47 @@ class Tracker:
                                                                        trust_remote_code=True).to(DEVICE)
             self.processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
 
+        # Player/Ball tracking variables
         self.model = YOLO(model_path)
-        self.config = config
         self.ball_model = YOLO(ball_model_path)
         self.tracker = sv.ByteTrack()
+        self.ball_tracker = BallTracker(buffer_size=20)
+
+        # Save output variables
         if config['save_output_video']:
             self.annotated_video_handle = save_video_stream_frames(source_path=config['input_video_path'],
                                                                    target_path=config['annotated_players_path'])
+            # Label shapes for save_output_video
+            self.ellipse_annotator = sv.EllipseAnnotator(
+                color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
+                thickness=2
 
-        self.ball_tracker = BallTracker(buffer_size=20)
+            )
+            self.label_annotator = sv.LabelAnnotator(
+                color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
+                text_color=sv.Color.from_hex('#000000'),
+                text_position=sv.Position.BOTTOM_CENTER
+            )
+
+            self.triangle_ball_possessor_annotator = sv.TriangleAnnotator(
+                color=sv.Color.from_hex('#880808'),
+                base=25,
+                height=21,
+                outline_thickness=1
+            )
+
+
+        # Video width/depth for inference slicer
         self.w, self.h = w, h
 
-        # initialize labels
-        self.ellipse_annotator = sv.EllipseAnnotator(
-            color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
-            thickness=2
 
-        )
-        self.label_annotator = sv.LabelAnnotator(
-            color=sv.ColorPalette.from_hex(['#00BFFF', '#FF1493', '#FFD700']),
-            text_color=sv.Color.from_hex('#000000'),
-            text_position=sv.Position.BOTTOM_CENTER
-        )
-        self.triangle_annotator = sv.TriangleAnnotator(
-            color=sv.Color.from_hex('#FFD700'),
-            base=25,
-            height=21,
-            outline_thickness=1
-        )
-        self.triangle_ball_possessor_annotator = sv.TriangleAnnotator(
-            color=sv.Color.from_hex('#880808'),
-            base=25,
-            height=21,
-            outline_thickness=1
-        )
-
-        self.vertex_annotator = sv.VertexAnnotator(
-            color=sv.Color.from_hex('#FF1493'),
-            radius=8)
-
-        self.vertex_annotator_2 = sv.VertexAnnotator(
-            color=sv.Color.from_hex('#00BFFF'),
-            radius=8)
-
+    """:
+    Runs assign_ball_to_player and returns its result
+    
+    Returns:
+        -1 if no possession
+        player's tracker id if possession
+    """
     def get_player_in_possession(self, ball_bbox, players, assigner):
         assigned_player = assigner.assign_ball_to_player(players=players, ball_bbox=ball_bbox)
         if assigned_player != -1:
@@ -226,6 +249,17 @@ class Tracker:
         else:
             return -1
 
+    """
+    Handles using YOLO and InferenceSlicer to detect the ball in the provided input video
+
+    Args:
+        batch (List[nd.array]):             A list of video frames for processing (process x at a time to ensure memory is not used up if video is large)
+        ball_positions_file (io.BufferedWriter):  A handle to ball_positions.pkl (empty) on append binary mode
+
+    Saves:
+        ball_positions.pkl: sv.Detections of ball data, if no detections will save an empty sv.Detections with np.nan populated in its bbox (fill_missing_positions will interpolate this)
+
+    """
     def get_ball_detections(self, batch, ball_positions_file):
         # slice frame in small parts and attempt to detect ball
         slicer = sv.InferenceSlicer(
@@ -257,18 +291,19 @@ class Tracker:
                 ball_detections = self.ball_tracker.update(ball_detections)
                 pickle.dump(ball_detections[0], ball_positions_file)
 
+    """
+    Performs inference using the given image and task prompt. Used only if SAM 2 option is checked
+
+    Args:
+        image (PIL.Image or tensor): The input image for processing.
+        task_prompt (str): The prompt specifying the task for the model.
+        text_input (str, optional): Additional text input to refine the prompt.
+
+    Returns:
+        dict: The model's processed response after inference.
+    """
     def florence_inference(self, image, task_prompt, text_input=None):
-        """
-        Performs inference using the given image and task prompt.
 
-        Args:
-            image (PIL.Image or tensor): The input image for processing.
-            task_prompt (str): The prompt specifying the task for the model.
-            text_input (str, optional): Additional text input to refine the prompt.
-
-        Returns:
-            dict: The model's processed response after inference.
-        """
         # Combine task prompt with additional text input if provided
         prompt = task_prompt if text_input is None else task_prompt + text_input
 
@@ -304,6 +339,15 @@ class Tracker:
 
         return parsed_answer  # Return the final processed output
 
+
+    """
+    Runs florence inference and returns its bbox data if detected.
+
+    Args:
+        frame (nd.array) The first frame of the video, which will attempt to detect the prompt (ball)
+    Returns:
+        dict: ball's bbox data or None (if no detection)
+    """
     def detect_ball_via_florence(self, frame):
         task_prompt = '<OPEN_VOCABULARY_DETECTION>'
         results = self.florence_inference(frame, task_prompt, text_input='ball')["<OPEN_VOCABULARY_DETECTION>"]
@@ -312,9 +356,21 @@ class Tracker:
             return results['bboxes'][0]
         else:
             return None
+    """
+    Performs SAM 2 ball tracking instead of YOLO ball tracking, with help from florence 2 to get the initial ball
+    position on the first frame.
 
+    Args:
+        input_path (string): Video input path
+        frame (nd.array): The first frame of the video for florence 2 ball detection
+        ball_positions_file (io.BufferedWriter): A file that will be populated with sv.Detections (ball data)
+
+    Saves:
+        ball_positions_file: Empty sv.Detections if no detection or the ball data
+    """
     def get_sam_detections(self, input_path, frame, ball_positions_file):
 
+        # filler sv.Detections variable
         filler_detection = sv.Detections.empty()
         filler_detection.xyxy = np.array([[np.nan, np.nan, np.nan, np.nan]])
 
@@ -332,7 +388,6 @@ class Tracker:
             predictor = SAM2VideoPredictor(overrides=overrides)
 
             try:
-                # Use the predictor to get results
                 results = predictor(source=input_path, stream=True, bboxes=self.sam_prompt)
                 os.makedirs('stubs', exist_ok=True)
 
@@ -350,10 +405,28 @@ class Tracker:
 
             self.sam_prompt_set = True
 
+    """
+    Callback for inference slicer to get the sv.Detection result of the ball if found.
+    This is only for one frame, as the library currently doesn't support batched processing
+    as it is still pending as a PR.
+
+    Returns:
+        sv.Detections: Ball detection if found.
+    """
     def callback(self, patch: np.ndarray) -> sv.Detections:
         result = self.ball_model.predict(patch, conf=0.3)[0]
         return sv.Detections.from_ultralytics(result)
 
+    """
+    Grabs a batch_size of frames from the frame generator
+    Args:
+        gen (generator): A frame generator
+        batch_size: The amount of frames to batch 
+        
+    Yields:
+       A generator composed of a list of frames.
+       Each function call advances the frames by batch_size (unless exhausted, which will return an empty list)
+    """
     def batch_generator(self, gen, batch_size):
         while True:
             batch = list(itertools.islice(gen, batch_size))
@@ -361,7 +434,19 @@ class Tracker:
                 break
             yield batch
 
-    def initialize_and_annotate(self, frame_gen):
+    """
+    Main function for processing player (YOLO) and ball (YOLO/SAM2 & FLORENCE2) tracking methods
+    For each batch of frames:
+        Gets ball tracking data and store in ball_positions.pkl
+        Gets player tracking data and store in player_positions.pkl
+        If save_output_video, save player annotated frames mp4 file (process_frame_batch)
+    Args:
+        frame_gen (generator): A frame generator of a video
+    Returns:
+        True if function has successfully ran
+        False if Florence 2 fails to detect the ball in the first frame 
+    """
+    def process_player_and_ball_tracking(self, frame_gen):
         os.makedirs('stubs', exist_ok=True)
         with (gzip.open(filename='stubs/player_positions.pkl', mode='ab') as f,
               gzip.open(filename='stubs/ball_positions.pkl', mode='ab') as f1):
@@ -376,12 +461,13 @@ class Tracker:
                         ui.notify('First frame ball not found')
                         return False
 
+                # get player detections (and annotate them if save_output_video)
                 detections_batch = self.model.predict(batch, conf=0.3)
                 for frame_in_batch, detections in zip(batch, detections_batch):
-                    self.process_frame_batch(frame_in_batch=frame_in_batch,
-                                             detections=detections,
-                                             player_positions_file= f
-                                             )
+                    self.process_player_frame_batch(frame_in_batch=frame_in_batch,
+                                                    detections=detections,
+                                                    player_positions_file= f
+                                                    )
             f.flush()
             f1.flush()
 
@@ -389,7 +475,16 @@ class Tracker:
             self.annotated_video_handle.release()
         return True
 
-    def process_frame_batch(self, detections, frame_in_batch, player_positions_file):
+    """
+    This function processes player detections per frame and handles its annotation
+    Args:
+        detections (sv.Detections): A singular detection from a batch (aligns with frame_in_batch)
+        frame_in_batch (nd.array): A singular video frame from a batch (aligns with detections)
+        player_positions_file (io.BufferedWriter): player_positions.pkl file to be written to (append binary)
+    Saves:
+        sv.Detections of each player's data in player_positions.pkl (appended frame by frame)
+    """
+    def process_player_frame_batch(self, detections, frame_in_batch, player_positions_file):
         # expects a single frame
         detections = sv.Detections.from_ultralytics(detections)
 

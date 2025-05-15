@@ -1,12 +1,11 @@
 import asyncio
-
 from trackers.tracker import BallHandler
 from utils import read_video
 from trackers import Tracker
 from split_videos import VideoSplitter
 import supervision as sv
 import torch
-from nicegui import ui, app, run, background_tasks, Client
+from nicegui import ui, app, background_tasks, Client
 import webview
 import os
 from audio_crop import AudioCrop
@@ -42,39 +41,49 @@ config = {
     'sam_2_mode': False,
     'sam_2_model_path': ''
 }
+"""
+Opens a windows file browser asking for a specified file format
+Args:
+    button (ui.button): The button linked to this function. Used for turning its colour green if file is selected.
+    input_video (bool): Is input video button? (*mp4/avi etc file)
+    ball_model (bool): Is ball model button? (*PT file)
+    player_model (bool): Is player model button?  (*PT file)
+    sam_2_model (bool): Is SAM2 model button?  (*PT file)
+    
+    
+Saves:
+    The path of the file to the linked config key
+"""
 
-async def choose_file(button, input_video = False,ball_model = False, player_model = False, sam_2_model = False):
+
+async def choose_file(button, input_video=False, ball_model=False, player_model=False, sam_2_model=False):
     if ball_model or player_model or sam_2_model:
-        files = await app.native.main_window.create_file_dialog(file_types=["PT Model (*.pt)"])
-        if files:
+        model_type = 'ball_model' if ball_model else 'player_model' if player_model else 'sam_2_model'
+        model_path = await app.native.main_window.create_file_dialog(file_types=["PT Model (*.pt)"])
+
+        if model_path:
+            config[f'{model_type}_path'] = model_path[0]
+            button.classes('bg-green', remove='bg-red')
+            print(config[f'{model_type}_path'])
             ui.notify("File set")
-
-            if ball_model:
-                config['ball_model_path'] = files[0]
-                button.classes('bg-green', remove='bg-red')
-                print(config['ball_model_path'])
-
-            elif player_model:
-                config['player_model_path'] = files[0]
-                button.classes('bg-green', remove='bg-red')
-                print(config['player_model_path'])
-            else:
-                config['sam_2_model_path'] = files[0]
-                button.classes('bg-green', remove='bg-red')
-                print(config['sam_2_model_path'])
-
     else:
-        files = await app.native.main_window.create_file_dialog(file_types=["Video file (*.mp4;*.mov;*.avi;*.mkv;*.flv;*.wmv;*.webm;*.m4v)"])
-        if files:
+        video_path = await app.native.main_window.create_file_dialog(
+            file_types=["Video file (*.mp4;*.mov;*.avi;*.mkv;*.flv;*.wmv;*.webm;*.m4v)"])
+
+        if video_path:
+            config['input_video_path'] = video_path[0]
+            button.classes('bg-green', remove='bg-red')
+            print(config['input_video_path'])
             ui.notify("File set")
-            if input_video:
-                config['input_video_path'] = files[0]
-                button.classes('bg-green', remove='bg-red')
-                print(config['input_video_path'])
 
 
-
-
+"""
+Opens a windows file browser asking a folder
+Args:
+    button (ui.button): The button linked to this function. Used for turning its colour green if file is selected.
+Saves:
+    The path of the file to the config['output_video_path']
+"""
 
 
 async def choose_output_folder(button):
@@ -85,6 +94,9 @@ async def choose_output_folder(button):
         button.classes('bg-green', remove='bg-red')
 
 
+"""
+Deletes every pkl (pickle) file or mp4 file in the stub directory if it exists.
+"""
 def delete_working_files():
     stub_path = os.path.join(os.getcwd(), 'stubs')
     if os.path.isdir(stub_path):
@@ -95,21 +107,30 @@ def delete_working_files():
                 print(f"Deleted: {file}")
 
 
+"""
+Checks for errors before the ball tracking method runs 
 
+Returns:
+    True if everything is set correctly
+    False if a requirement isn't correct
+"""
 def ball_tracking_error_checking():
     # ERROR CHECKING
+
+    # Ball model or SAM 2 model needs to be set
     if all(config.get(key) in [None, ''] for key in ['ball_model_path', 'sam_2_model_path']):
         notify('ERROR: Set ball model or SAM 2 model')
         print(f"Ball model or SAM model not set")
         return False
 
+    # SAM 2 needs to be set if SAM 2 option is checked
     if config['sam_2_mode']:
         if not config['sam_2_model_path']:
             notify('ERROR: SAM2 model is required')
             print(f"SAM Model not set")
             return False
 
-    # AI detection method via ball tracking
+    # Checks generic requirements: Input video, output folder and player ball detection model
     if any(config.get(key) in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path']):
         notify('ERROR: Not all inputs set')
         print(f"RUN PROGRAM ERROR")
@@ -118,12 +139,32 @@ def ball_tracking_error_checking():
     return True
 
 
-# for background tasks (as multi processes don't know which client to notify)
+"""
+An extension to the ui.notify that works on background threads.
+This sends the ui.notify to every client, so ui.notify works even if inside a different process.
+"""
 def notify(msg: str):
     for client in Client.instances.values():
         with client:
             ui.notify(msg)
+"""
+The main ball tracking method function
+Steps:
+    1. Stores a generator composed of all the frames of input_video_path in frame_gen.
+    
+    2. Initializes tracker & calls process_player_and_ball_tracking which handles player and ball tracking
+       (creates an mp4 file of annotated players if save_output_video, and pickle files for later use)
+       
+    3. Initializes BallHandler responsible for filling missing ball tracking data, getting the player in possession per frame and
+       ball annotation (if save_output_video) via handle_ball_tracking function.
 
+    4. Initializes VideoSplitter class, relying on player_in_possession_buffer.pkl to crop the video, depending if a player
+       is possessing the ball for config['frames_considered_possession'] frames (start).
+       The crop end is finding the next possessor possessing for the same amount of frames.
+       
+Args:
+    config (dict): A copy of config passed through as this function will be run in a different process.
+"""
 def run_program(config):
     # delete previous working files if applicable
     delete_working_files()
@@ -138,13 +179,11 @@ def run_program(config):
     # Initialize Tracker
     tracker = Tracker(config['player_model_path'], config['ball_model_path'], w=width, h=height,config= config)
 
-    # Annotate ball and player positions
+    # Annotate ball and player positions, and get the player in possession per frame buffer
     frame_gen = read_video(config['input_video_path'])
-    tracker.initialize_and_annotate(
-        frame_gen=frame_gen
-    )
+    tracker.process_player_and_ball_tracking(frame_gen=frame_gen)
 
-    print("Intialize and annotate DONE")
+    print("Initialize and annotate DONE")
 
     # Handle ball tracking
     ball_handler = BallHandler(
@@ -173,6 +212,18 @@ def run_program(config):
     print("Done")
 
 
+"""
+The main audio tracking method function
+Steps:
+    1. Checks if all the relevant inputs have been selected.
+
+    2. Initializes AudioCrop responsible for handling the audio crop process, using faster_whisper
+       to find config['audio_crop_player_name'], which marks the start (+ config['audio_start_time_offset']).
+       It then uses a fixed duration config['audio_crop_duration'] to mark the end (no reliable method to find the next possessor)
+
+Args:
+    config (dict): A copy of config passed through as this function will be run in a different process.
+"""
 async def run_audio_crop_program(config):
     loop = asyncio.get_running_loop()
     if all(config.get(k) for k in ['input_video_path', 'output_video_path', 'audio_crop_player_name']):
@@ -196,7 +247,14 @@ async def run_audio_crop_program(config):
         notify('ERROR: Parameters not filled/correct')
 
 
+"""
+The function that gets called when the RUN button is clicked
+This function determines which method function to run, and disables/re-enables the button when necessary (via disable function)
 
+Args:
+    button (ui.button): The run button, used for disabling and re-enabling the button when a method is finished.
+    spinner (ui.spinner): A spinner widget that shows up when a method is running, disabled when finished.
+"""
 async def run_main_async(button, spinner):
     loop = asyncio.get_running_loop()
     with disable(button, spinner):
@@ -215,6 +273,12 @@ async def run_main_async(button, spinner):
         else:
             notify("ERROR: Select a method.")
 
+"""
+Function responsible for disabling/re-enabling the spinner and button using a context manager (allows the use of with:)
+Args:
+    button (ui.button): The run button, Enabled on setup and disabled on cleanup
+    spinner (ui.spinner): Visible on setup and disabled on cleanup
+"""
 @contextmanager
 def disable(button: ui.button, spinner: ui.spinner):
     button.disable()
@@ -227,7 +291,9 @@ def disable(button: ui.button, spinner: ui.spinner):
 
 
 
-
+"""
+The main UI code, using NiceGUI as the front end.
+"""
 def main():
     ui.dark_mode().enable()
 

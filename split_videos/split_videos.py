@@ -15,11 +15,25 @@ class VideoSplitter:
         self.ball_frame_forgiveness = ball_frame_forgiveness
         self.output_dir = output_folder
 
-    def cleanup(self):
-        for attr in list(self.__dict__.keys()):
-            delattr(self, attr)
-        gc.collect()
 
+
+    """
+    Function that determines if the player is considered possessing the ball
+    It goes through the tracker_array from the current frame idx to steps_ahead times, and
+    if error_count > forgive_frames, its not considered a consistent player possession.
+    
+    It is considered an error if the tracker id of the current frame isn't the same as the 
+    tracker_id on the first index of the loop
+
+    Args:
+        current_idx (int): The current frame index
+        steps_ahead (int): The amount of frames to check ahead step_ahead times
+        forgive_frames (str, optional): The amount of errors allowed before not considered consistent anymore.
+
+    Returns:
+        False if error_count > forgive_frames
+        True if it goes through tracker_array step_ahead times without error_count > forgive_frames
+    """
     def is_possession_consistent(self, current_idx, steps_ahead=10, forgive_frames=3):
         # ensure we're not going over the video's length
         if current_idx > len(self.tracker_array):
@@ -42,8 +56,18 @@ class VideoSplitter:
 
         return True
 
+    """
+    Function handles saving the video after the video has been cropped correctly (trim_frames)
+    
+    Args:
+        trim_frames (List(nd.array)): A list of frames that should start when the player is possessing, and end when they're not.
+        player_id (int): Player id of the current player (ByteTrack assigned), could be same player but new ID due to them disappearing from the video.
+        frame_idx (int): Current frame index, usually the end of a crop, used for naming the cropped video.
 
-
+    Returns:
+        Early return if no frames in trim_frames
+        
+    """
     def handle_end_point(self, trim_frames, player_id, frame_idx):
         print("end point reached")
 
@@ -63,6 +87,18 @@ class VideoSplitter:
             frames=trim_frames
         )
 
+    """
+    Main function responsible for processing the cropped video
+    Steps:
+        1. Goes through a frame generator of the input video
+        2. Gets the current player possessing the ball's tracker id via tracker_array (list from player_in_possession_buffer.pkl)
+        3. If not tracking anyone yet, assign current_player to the tracked id and keep appending until a new player is consistently possessing the ball.
+        4. If new possessor, keep appending frames to trim_frames until grace period is up
+        5. Once grace period is up, save the cropped video by calling handle_end_point and pass in trim_frames.
+        6. Reset all variables and repeat step 2.
+        7. Once generator is exhausted and we're still tracking a player, just set end point to the end of the video and crop. 
+
+    """
     def crop_videos(self):
         current_player = None
         trim_frames = []
