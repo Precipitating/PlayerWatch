@@ -1,6 +1,7 @@
 
 ## 🧠 Methods Available
 [Ball detection model](https://drive.google.com/uc?id=1isw4wx-MK9h9LMr36VvIWlJD6ppUvw7V)
+
 [Player detection model](https://drive.google.com/uc?id=17PXFNlx-jI7VjVo_vQnB1sONjRyvoB-q)
 ### 1. YOLO and YOLO
 **Tracking**:  
