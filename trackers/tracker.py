@@ -104,7 +104,7 @@ class BallHandler:
                     for i in range(len(batch)):
                         det = batch[i]
                         if np.isnan(det.xyxy[0]).any():
-                            det.xyxy[0] = np.array([df_ball_positions[i]])
+                            det.xyxy[0] = np.array(df_ball_positions[i], dtype=np.float32)
 
                         pickle.dump(det, f1)
             f1.flush()
@@ -133,6 +133,12 @@ class BallHandler:
                 # load data per frame
                 current_player_positions = pickle.load(f1)
                 complete_ball_pos = pickle.load(f)
+
+                if np.isnan(complete_ball_pos.xyxy).any() or len(current_player_positions) == 0:
+                    print("Frame has no ball or player detection")
+                    pickle.dump(None, f2)
+                    self.final_annotated_video.write(frame)
+                    continue
 
                 player_in_possession = self.player_assigner.assign_ball_to_player(
                     ball_bbox=complete_ball_pos.xyxy[0],
@@ -186,6 +192,9 @@ class BallHandler:
                     print("Frames finished")
                     if self.config['save_output_video']:
                         self.final_annotated_video.release()
+                    break
+                except Exception as e:
+                    print(f"An unexpected error occurred: {e}")
                     break
             f2.flush()
 

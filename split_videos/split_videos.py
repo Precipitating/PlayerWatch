@@ -106,6 +106,10 @@ class VideoSplitter:
         grace_active = False
 
         for frame_idx, frame in enumerate(tqdm(self.frame_gen, desc="Cropping videos")):
+
+            if frame_idx >= len(self.tracker_array):
+                print(f"Warning: frame_idx {frame_idx} out of tracker_array bounds")
+                break
             tracker_info = self.tracker_array[frame_idx]
             tracked_id = tracker_info[0] if tracker_info else None
 
