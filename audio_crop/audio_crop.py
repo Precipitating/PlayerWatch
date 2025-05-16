@@ -17,9 +17,9 @@ class AudioCrop:
 
     """
     Main function responsible for using faster-whisper to find the target_name via word timestamping,
-    checking if its similar enough via rapidfuzz, and cropping.
+    checking if its similar enough via rapidfuzz, and if so, crops the video.
     
-    It goes through word by word, finding if its similar enough and uses that as the start point of the crop.
+    It goes through word by word, checking if its similar enough and uses that as the start point of the crop.
     It then crops at a fixed duration from the word start (+ offset if specified) and saves the video (using ffmpeg)
 
     Args:

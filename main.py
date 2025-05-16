@@ -1,4 +1,5 @@
 import asyncio
+import multiprocessing
 from trackers.tracker import BallHandler
 from utils import read_video
 from trackers import Tracker
@@ -12,7 +13,11 @@ from audio_crop import AudioCrop
 from contextlib import contextmanager
 import glob
 from concurrent.futures import ProcessPoolExecutor
+import sys
+import psutil
+
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+sys.stdout = open('logs.txt', 'w')
 
 config = {
     'input_video_path': '',
@@ -39,8 +44,17 @@ config = {
     'audio_word_similarity': 70,
 
     'sam_2_mode': False,
-    'sam_2_model_path': ''
+    'sam_2_model': 'sam2.1_b.pt'
 }
+
+
+def kill_process_and_children(pid):
+    parent = psutil.Process(pid)
+    children = parent.children(recursive=True)
+    for child in children:
+        child.kill()  # or .terminate()
+    parent.kill()
+
 """
 Opens a windows file browser asking for a specified file format
 Args:
@@ -117,18 +131,11 @@ Returns:
 def ball_tracking_error_checking():
     # ERROR CHECKING
 
-    # Ball model or SAM 2 model needs to be set
-    if all(config.get(key) in [None, ''] for key in ['ball_model_path', 'sam_2_model_path']):
-        notify('ERROR: Set ball model or SAM 2 model')
-        print(f"Ball model or SAM model not set")
+    # Ball model needs to be set
+    if all(config.get(key) in [None, ''] for key in ['ball_model_path']):
+        notify('ERROR: Set ball model')
+        print(f"Ball model not set")
         return False
-
-    # SAM 2 needs to be set if SAM 2 option is checked
-    if config['sam_2_mode']:
-        if not config['sam_2_model_path']:
-            notify('ERROR: SAM2 model is required')
-            print(f"SAM Model not set")
-            return False
 
     # Checks generic requirements: Input video, output folder and player ball detection model
     if any(config.get(key) in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path']):
@@ -265,8 +272,6 @@ async def run_main_async(button, spinner):
                 try:
                     with ProcessPoolExecutor() as executor:
                         await loop.run_in_executor(executor,run_program, config.copy())
-
-                    #await run.cpu_bound(run_program, config.copy())
                 except Exception as e:
                     print('Error:', e)
                     notify(f'ERROR: {e}')
@@ -289,8 +294,22 @@ def disable(button: ui.button, spinner: ui.spinner):
         button.enable()
         spinner.visible = False
 
+"""
+Generic dropdown button function.
+Updates the model name in config,
+Updates the text to the model name.
+"""
+def update_dropdown_button(key_name, button, model):
+    config.update({key_name: model})
+    button.text = model
 
-
+"""
+Force kill every process running abruptly with no cleanup
+"""
+def shutdown_app():
+    print("Shutting down the application...")
+    kill_process_and_children(os.getpid())
+    sys.exit(0)
 """
 The main UI code, using NiceGUI as the front end.
 """
@@ -300,7 +319,7 @@ def main():
     with ui.card():
         with ui.row().classes('w-full justify-center'):
             ui.label("Player Watch:")
-
+        ui.button('FORCE SHUTDOWN', on_click=shutdown_app).classes('bg-red w-full justify-center')
         ui.separator()
         # INPUTS
         with ui.grid(columns=2).classes('items-center gap-4'):
@@ -318,7 +337,11 @@ def main():
             ball_model_button = ui.button('Browse', on_click= lambda: choose_file(button= ball_model_button, ball_model= True)).classes('text-sm px-6 py-1 bg-red')
 
             ui.label("SAM 2 Model:").classes("self-center")
-            sam_2_model = ui.button('Browse', on_click= lambda: choose_file(button= sam_2_model, sam_2_model= True)).classes('text-sm px-6 py-1 bg-red')
+            with ui.dropdown_button(config['sam_2_model'], auto_close=True).classes('text-sm px-6 py-1 bg-green') as SAM2_model_button:
+                ui.item('tiny', on_click=lambda: update_dropdown_button(key_name='sam_2_model',button= SAM2_model_button, model= 'sam2.1_t.pt'))
+                ui.item('small', on_click=lambda: update_dropdown_button(key_name='sam_2_model',button= SAM2_model_button, model= 'sam2.1_s.pt'))
+                ui.item('base', on_click=lambda:update_dropdown_button(key_name='sam_2_model',button= SAM2_model_button, model= 'sam2.1_b.pt'))
+                ui.item('large', on_click=lambda: update_dropdown_button(key_name='sam_2_model',button= SAM2_model_button, model= 'sam2.1_l.pt'))
 
         ui.separator()
         # CHOOSE METHOD
@@ -339,12 +362,12 @@ def main():
         # AUDIO METHOD
         ui.separator()
         with ui.row().classes('w-full justify-center'):
-            with ui.dropdown_button('Model:', auto_close=True).bind_visibility_from(ai_audio_crop, 'value'):
-                ui.item('tiny', on_click=lambda: config.update({'whisper_model': 'tiny'}))
-                ui.item('small', on_click=lambda e: config.update({'whisper_model': 'small'}))
-                ui.item('medium', on_click=lambda e: config.update({'whisper_model': 'medium'}))
-                ui.item('base', on_click=lambda e: config.update({'whisper_model': 'base'}))
-                ui.item('large-v3', on_click=lambda e: config.update({'whisper_model': 'large-v3'}))
+            with ui.dropdown_button(config['whisper_model'], auto_close=True).bind_visibility_from(ai_audio_crop, 'value').classes('bg-green') as audio_crop_button:
+                ui.item(text= 'tiny', on_click=lambda: update_dropdown_button(key_name= 'whisper_model', button=audio_crop_button, model= 'tiny'))
+                ui.item(text= 'small', on_click=lambda e: update_dropdown_button(key_name= 'whisper_model', button=audio_crop_button, model= 'small'))
+                ui.item(text= 'medium', on_click=lambda e: update_dropdown_button(key_name= 'whisper_model', button=audio_crop_button, model= 'medium'))
+                ui.item(text= 'base', on_click=lambda e: update_dropdown_button(key_name= 'whisper_model', button=audio_crop_button, model= 'base'))
+                ui.item(text= 'large-v3', on_click=lambda e: update_dropdown_button(key_name= 'whisper_model', button=audio_crop_button, model= 'large-v3'))
 
         with ui.grid(columns=2).classes('items-center').bind_visibility_from(ai_audio_crop, 'value'):
             ui.number(label="Batch Size",
@@ -452,12 +475,10 @@ def main():
             processing_spinner.visible = False
 
 
-
-
     app.native.window_args['resizable'] = False
+    app.on_shutdown(shutdown_app)
     ui.run(native=True, window_size=(430,830), reload= False, title="PlayerWatch")
 
-
-
 if __name__ in "__main__":
+    multiprocessing.freeze_support()
     main()

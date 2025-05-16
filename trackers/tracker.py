@@ -1,6 +1,6 @@
 import gzip
 import itertools
-from ultralytics import YOLO, SAM
+from ultralytics import YOLO
 from ultralytics.models.sam import SAM2VideoPredictor
 import supervision as sv
 import pickle
@@ -17,6 +17,8 @@ from PIL import Image
 import torch
 from utils import read_video
 from utils.video_utils import save_video_stream_frames
+import timm
+import timm.models.layers  # Force PyInstaller to include it
 
 sys.path.append('../')
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -193,7 +195,6 @@ class Tracker:
         self.config = config
         # SAM2 variables
         if config['sam_2_mode']:
-            self.sam_model = SAM(config['sam_2_model_path'])
             self.sam_prompt = 0
             self.sam_prompt_set = False
             self.florence_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base",
@@ -382,7 +383,7 @@ class Tracker:
         ball_bbox = self.detect_ball_via_florence(Image.fromarray(frame))
         if ball_bbox:
             self.sam_prompt = ball_bbox
-            overrides = dict(conf=0.3, task="segment", mode="predict", imgsz=1024, model="sam2_b.pt")
+            overrides = dict(conf=0.3, task="segment", mode="predict", imgsz=1024, model=self.config['sam_2_model'])
 
             # Initialize the predictor
             predictor = SAM2VideoPredictor(overrides=overrides)
@@ -393,7 +394,6 @@ class Tracker:
 
                 for result in results:
                     if len(result.boxes.xyxy) != 0:
-                        print(result.boxes.xyxy.cpu().numpy())
                         filler_detection.xyxy = result.boxes.xyxy.cpu().numpy()
                         pickle.dump(filler_detection, ball_positions_file)
                     else:
