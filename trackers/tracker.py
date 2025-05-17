@@ -17,6 +17,7 @@ from PIL import Image
 import torch
 from utils import read_video
 from utils.video_utils import save_video_stream_frames
+from typing import List
 import timm
 import timm.models.layers  # Force PyInstaller to include it
 
@@ -273,7 +274,8 @@ class Tracker:
     def get_ball_detections(self, batch, ball_positions_file):
         # slice frame in small parts and attempt to detect ball
         slicer = sv.InferenceSlicer(
-            callback=self.callback,
+            callback=self.callback_batched,
+            batch_size = self.config['batch_size'],
             overlap_filter=sv.OverlapFilter.NON_MAX_SUPPRESSION,
             slice_wh=(self.w // 2 + 100, self.h // 2 + 100),
             overlap_ratio_wh=None,
@@ -416,8 +418,6 @@ class Tracker:
 
     """
     Callback for inference slicer to get the sv.Detection result of the ball if found.
-    This is only for one frame, as the library currently doesn't support batched processing
-    as it is still pending as a PR.
 
     Returns:
         sv.Detections: Ball detection if found.
@@ -425,6 +425,18 @@ class Tracker:
     def callback(self, patch: np.ndarray) -> sv.Detections:
         result = self.ball_model.predict(patch, conf=0.3)[0]
         return sv.Detections.from_ultralytics(result)
+
+    """
+    Callback for inference slicer to get the sv.Detection result of the ball if found.
+    This uses more memory but processes the slices in batches instead, making it faster.
+
+    Returns:
+        sv.Detections: Ball detection if found.
+    """
+    def callback_batched(self, slices: List[np.ndarray]) -> List[sv.Detections]:
+        results = self.ball_model.predict(slices, conf=0.3)
+        detections_list = [sv.Detections.from_ultralytics(result) for result in results]
+        return detections_list
 
     """
     Grabs a batch_size of frames from the frame generator
