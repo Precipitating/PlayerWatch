@@ -39,5 +39,5 @@ The fastest method, ideal when match commentary is available.
 - The **end** is set to a fixed time after the mention.
 
 **Performance**:
-- Processes a ~50-minute video in just a few minutes.
+- Processes a ~50-minute video in just a few minutes from a 3080, 5900x rig
 - Highly effective and efficient when commentary is present.
