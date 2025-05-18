@@ -132,10 +132,12 @@ def ball_tracking_error_checking():
     # ERROR CHECKING
 
     # Ball model needs to be set
-    if all(config.get(key) in [None, ''] for key in ['ball_model_path']):
-        notify('ERROR: Set ball model')
-        print(f"Ball model not set")
-        return False
+    if not config['sam_2_mode']:
+        if all(config.get(key) in [None, ''] for key in ['ball_model_path']):
+            notify('ERROR: Set ball model')
+            print(f"Ball model not set")
+            return False
+
 
     # Checks generic requirements: Input video, output folder and player ball detection model
     if any(config.get(key) in [None, ''] for key in ['input_video_path', 'output_video_path', 'player_model_path']):

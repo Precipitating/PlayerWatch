@@ -479,6 +479,7 @@ class Tracker:
                 elif not self.sam_prompt_set:
                     self.get_sam_detections(self.config['input_video_path'], batch[0], f1)
                     if not self.sam_prompt_set:
+                        print("Florence could not find the ball in the first frame")
                         ui.notify('First frame ball not found')
                         return False
 
@@ -516,8 +517,6 @@ class Tracker:
 
         players_detections = all_detections[all_detections.class_id == PLAYER_ID]
 
-        # store to disk to reduce memory
-        os.makedirs('stubs', exist_ok=True)
         pickle.dump(players_detections, player_positions_file)
 
         # draw annotations
